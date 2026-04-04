@@ -41,7 +41,19 @@ export const LandingPage: React.FC = () => {
             id: doc.id,
             ...doc.data()
           }))
-          .filter((course: any) => course.isVisible !== false) as Course[];
+          .filter((course: any) => course.isVisible !== false)
+          .sort((a: any, b: any) => {
+            // Sort by date first
+            const dateA = new Date(a.date).getTime();
+            const dateB = new Date(b.date).getTime();
+            if (dateA !== dateB) {
+              return dateA - dateB;
+            }
+            // If dates are equal, sort by start time
+            const timeA = a.startTime || a.sessions?.[0]?.startTime || "00:00";
+            const timeB = b.startTime || b.sessions?.[0]?.startTime || "00:00";
+            return timeA.localeCompare(timeB);
+          }) as Course[];
         
         setCourses(fetchedCourses);
 

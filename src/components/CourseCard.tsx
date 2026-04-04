@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Calendar, User, ArrowRight, Clock, Layers, Users, X } from "lucide-react";
+import { Calendar, User, ArrowRight, Clock, Layers, Users, X, MapPin } from "lucide-react";
 import { Course } from "../types";
 import { cn, formatInstructorName, formatDateThai } from "../lib/utils";
 
@@ -35,6 +35,11 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, isLo
   
   const availableSeats = Math.max(0, maxSeats - enrolledSeats);
   const isFull = maxSeats > 0 && availableSeats === 0;
+
+  const startTime = course.sessions?.[0]?.startTime || (course as any).startTime || "";
+  const endTime = course.sessions?.[0]?.endTime || (course as any).endTime || "";
+  const locationDetail = course.sessions?.[0]?.locationDetail || (course as any).locationDetail || "ไม่ระบุ";
+  const timeString = startTime && endTime ? `${startTime} - ${endTime} น.` : startTime ? `${startTime} น.` : "";
 
   return (
     <>
@@ -90,11 +95,22 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, isLo
               </div>
               <span className="font-light tracking-wide">{formatInstructorName(course.instructorName)}</span>
             </div>
-            <div className="flex items-center gap-3 text-crimson text-sm bg-crimson/5 p-2 rounded-xl">
-              <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm">
-                <Calendar className="w-4 h-4 text-crimson" />
+            <div className="flex flex-col gap-2 bg-crimson/5 p-3 rounded-xl">
+              <div className="flex items-center gap-3 text-crimson text-sm">
+                <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm shrink-0">
+                  <Calendar className="w-4 h-4 text-crimson" />
+                </div>
+                <div className="flex flex-col">
+                  <span className="font-medium tracking-wide">วันที่อบรม: {formatDateThai(course.date)}</span>
+                  {timeString && <span className="text-xs font-medium opacity-80">เวลา: {timeString}</span>}
+                </div>
               </div>
-              <span className="font-medium tracking-wide">วันที่อบรม: {formatDateThai(course.date)}</span>
+              <div className="flex items-center gap-3 text-crimson text-sm">
+                <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm shrink-0">
+                  <MapPin className="w-4 h-4 text-crimson" />
+                </div>
+                <span className="font-medium tracking-wide text-xs">ห้อง: {locationDetail}</span>
+              </div>
             </div>
             {maxSeats > 0 && (
               <div className="flex items-center gap-3 text-slate-500 text-sm">
