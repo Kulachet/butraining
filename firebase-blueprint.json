@@ -1,0 +1,86 @@
+{
+  "entities": {
+    "instructors": {
+      "title": "Instructor",
+      "description": "A Bangkok University instructor profile.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "name": { "type": "string", "description": "Full name in Thai" },
+        "email": { "type": "string", "format": "email", "description": "BU email address (@bu.ac.th)" },
+        "position": { "type": "string", "description": "Academic position" },
+        "department": { "type": "string", "description": "Department or Faculty" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Registration timestamp" }
+      },
+      "required": ["uid", "name", "email", "position", "department"]
+    },
+    "courses": {
+      "title": "Course",
+      "description": "A training course offered by the portal.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique course ID" },
+        "title": { "type": "string", "description": "Course title" },
+        "instructorName": { "type": "string", "description": "Name of the instructor teaching the course" },
+        "date": { "type": "string", "description": "Training date" },
+        "time": { "type": "string", "description": "Training time" },
+        "location": { "type": "string", "description": "Training location" },
+        "description": { "type": "string", "description": "Brief course description" },
+        "imageUrl": { "type": "string", "description": "Course thumbnail URL" },
+        "driveFolderId": { "type": "string", "description": "Google Drive Folder ID for certificates" }
+      },
+      "required": ["title", "instructorName", "date"]
+    },
+    "registrations": {
+      "title": "Registration",
+      "description": "A course registration record.",
+      "type": "object",
+      "properties": {
+        "courseId": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userPosition": { "type": "string" },
+        "userDepartment": { "type": "string" },
+        "sequenceNumber": { "type": "integer" },
+        "attended": { "type": "boolean" },
+        "registeredAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["courseId", "userId", "sequenceNumber", "attended"]
+    },
+    "mail": {
+      "title": "Mail",
+      "description": "Email queue for Firebase Trigger Email extension.",
+      "type": "object",
+      "properties": {
+        "to": { "type": "string" },
+        "message": {
+          "type": "object",
+          "properties": {
+            "subject": { "type": "string" },
+            "html": { "type": "string" },
+            "attachments": { "type": "array", "items": { "type": "object" } }
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/instructors/{instructorId}": {
+      "schema": "instructors",
+      "description": "Instructor profiles, keyed by UID."
+    },
+    "/courses/{courseId}": {
+      "schema": "courses",
+      "description": "Public training courses."
+    },
+    "/registrations/{regId}": {
+      "schema": "registrations",
+      "description": "Course registrations."
+    },
+    "/mail/{mailId}": {
+      "schema": "mail",
+      "description": "Email queue."
+    }
+  }
+}

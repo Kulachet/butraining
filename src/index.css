@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800;900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-crimson: #991b1b;
+  --color-crimson-dark: #7f1d1d;
+  --color-crimson-light: #fef2f2;
+  --font-sans: "Prompt", ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-white text-[#4A4A4A] font-sans font-normal leading-[1.7] antialiased;
+  }
+  
+  h1 {
+    @apply text-[28px] lg:text-[32px] font-bold tracking-[0.02em] leading-[1.6] text-[#333333];
+  }
+
+  h2 {
+    @apply text-[20px] lg:text-[24px] font-semibold tracking-[0.02em] leading-[1.6] text-[#333333];
+  }
+
+  h3 {
+    @apply text-[18px] lg:text-[20px] font-semibold tracking-[0.02em] leading-[1.6] text-[#333333];
+  }
+}
