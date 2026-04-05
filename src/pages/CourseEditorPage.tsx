@@ -85,6 +85,19 @@ export const CourseEditorPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  useEffect(() => {
+    const fetchInstructors = async () => {
+      try {
+        const snap = await getDocs(collection(db, "instructors"));
+        const instList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Instructor));
+        setInstructors(instList);
+      } catch (error) {
+        console.error("Error fetching instructors:", error);
+      }
+    };
+    fetchInstructors();
+  }, []);
+
   const { register, handleSubmit, control, watch, setValue, formState: { errors, isDirty } } = useForm<FormData>({
     resolver: zodResolver(schema),
     defaultValues: {
@@ -376,9 +389,15 @@ export const CourseEditorPage: React.FC = () => {
                     <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">วิทยากร</label>
                     <input 
                       {...register("instructorName")}
+                      list="instructors-list"
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium"
                       placeholder="ชื่อ-นามสกุล วิทยากร"
                     />
+                    <datalist id="instructors-list">
+                      {instructors.map(inst => (
+                        <option key={inst.id} value={inst.name} />
+                      ))}
+                    </datalist>
                   </div>
                   <div className="space-y-2">
                     <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ห้อง / สถานที่</label>
@@ -468,7 +487,7 @@ export const CourseEditorPage: React.FC = () => {
                 <div className="aspect-[3/4] bg-slate-50 rounded-[2rem] border-2 border-dashed border-slate-200 overflow-hidden relative group transition-all hover:border-crimson/30">
                   {(watchBannerImageBase64 || watchImageUrl) ? (
                     <>
-                      <img src={watchBannerImageBase64 || watchImageUrl} alt="Cover Preview" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      <img src={watchBannerImageBase64 || watchImageUrl} alt="Cover Preview" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
                       <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
                         <label className="cursor-pointer p-3 bg-white text-crimson rounded-xl hover:scale-110 transition-transform">
                           <Upload className="w-5 h-5" />
@@ -510,7 +529,7 @@ export const CourseEditorPage: React.FC = () => {
                             <p className="text-[10px] font-bold text-crimson">{Math.round(uploadProgress)}%</p>
                           </div>
                         )}
-                        <p className="text-[10px] mt-1">Vertical Ratio 3:4</p>
+                        <p className="text-[10px] mt-1">Portrait Ratio 3:4</p>
                       </div>
                       <input type="file" className="hidden" onChange={handleImageUpload} accept="image/*" />
                     </label>

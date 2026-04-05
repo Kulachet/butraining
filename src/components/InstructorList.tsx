@@ -14,8 +14,7 @@ export const InstructorList: React.FC = () => {
   useEffect(() => {
     const q = query(
       collection(db, "instructors"), 
-      orderBy("id", "asc"),
-      limit(500)
+      orderBy("id", "asc")
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {

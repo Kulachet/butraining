@@ -23,6 +23,10 @@ export const LandingPage: React.FC = () => {
   const [showModal, setShowModal] = useState(false);
   const [courseToCancel, setCourseToCancel] = useState<string | null>(null);
   
+  // Search and Filter State
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("ทั้งหมด");
+  
   // Session Selection State
   const [selectedCourseForSession, setSelectedCourseForSession] = useState<Course | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -156,6 +160,17 @@ export const LandingPage: React.FC = () => {
     }
   };
 
+  const filteredCourses = courses.filter(course => {
+    const matchesSearch = course.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                          (course.description && course.description.toLowerCase().includes(searchQuery.toLowerCase())) ||
+                          (course.instructorName && course.instructorName.toLowerCase().includes(searchQuery.toLowerCase()));
+    const matchesCategory = selectedCategory === "ทั้งหมด" || course.category === selectedCategory;
+    return matchesSearch && matchesCategory;
+  });
+
+  // Extract unique categories from courses
+  const categories = ["ทั้งหมด", ...Array.from(new Set(courses.map(c => c.category).filter(Boolean)))];
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {!user ? (
@@ -231,17 +246,6 @@ export const LandingPage: React.FC = () => {
                   <p className="text-xl text-slate-500 font-light leading-relaxed mb-10 tracking-wide">
                     ยกระดับทักษะการสอนและการวิจัยด้วยหลักสูตรที่ทันสมัย ออกแบบมาเพื่ออาจารย์มหาวิทยาลัยกรุงเทพโดยเฉพาะ
                   </p>
-                  
-                  <div className="flex flex-col sm:flex-row items-center justify-start gap-4">
-                    <div className="relative w-full max-w-md">
-                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-5 h-5" />
-                      <input 
-                        type="text" 
-                        placeholder="ค้นหาหลักสูตรที่น่าสนใจ..."
-                        className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson focus:border-transparent outline-none transition-all shadow-sm font-light tracking-wide"
-                      />
-                    </div>
-                  </div>
                 </motion.div>
 
                 <div className="hidden lg:block">
@@ -256,25 +260,31 @@ export const LandingPage: React.FC = () => {
             {instructor && <InstructorProfile instructor={instructor} />}
           </div>
 
-          {/* Courses Grid */}
-          <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 -mt-20 pb-20">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-              {courses.map((course, index) => (
-                <motion.div
-                  key={course.id}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.1 }}
-                >
-                  <CourseCard 
-                    course={course} 
-                    onRegister={handleRegisterClick} 
-                    onCancel={setCourseToCancel}
-                    isLoading={registering === course.id}
-                    isRegistered={userRegistrations.includes(course.id)}
-                  />
-                </motion.div>
-              ))}
+          {/* Main Content Area */}
+          <section className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 -mt-10 pb-20">
+            <div className="w-full flex flex-col gap-6">
+              {filteredCourses.length === 0 ? (
+                <div className="bg-white p-12 rounded-3xl border border-slate-200 shadow-sm text-center">
+                  <p className="text-slate-500 font-light">ไม่พบหลักสูตรที่ค้นหา</p>
+                </div>
+              ) : (
+                filteredCourses.map((course, index) => (
+                  <motion.div
+                    key={course.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                  >
+                    <CourseCard 
+                      course={course} 
+                      onRegister={handleRegisterClick} 
+                      onCancel={setCourseToCancel}
+                      isLoading={registering === course.id}
+                      isRegistered={userRegistrations.includes(course.id)}
+                    />
+                  </motion.div>
+                ))
+              )}
             </div>
           </section>
         </>
