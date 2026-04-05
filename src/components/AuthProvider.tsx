@@ -40,11 +40,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!querySnapshot.empty) {
         instructorDoc = querySnapshot.docs[0];
       } else {
-        // Fallback: Try exact email match just in case it's stored with mixed casing
+        // Fallback 1: Try exact email match just in case it's stored with mixed casing
         q = query(collection(db, "instructors"), where("email", "==", email.trim()));
         querySnapshot = await getDocs(q);
         if (!querySnapshot.empty) {
           instructorDoc = querySnapshot.docs[0];
+        } else {
+          // Fallback 2: Client-side case-insensitive search for existing mixed-case data
+          // This is necessary because Firestore queries are strictly case-sensitive
+          // and some CSV uploads might contain emails like "Sumalee.Y@bu.ac.th"
+          const allDocs = await getDocs(collection(db, "instructors"));
+          const matchedDoc = allDocs.docs.find(d => {
+            const dataEmail = d.data().email;
+            return dataEmail && dataEmail.toLowerCase().trim() === normalizedEmail;
+          });
+          if (matchedDoc) {
+            instructorDoc = matchedDoc;
+          }
         }
       }
 

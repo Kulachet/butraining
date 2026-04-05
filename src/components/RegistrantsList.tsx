@@ -13,7 +13,8 @@ import {
   QrCode,
   X,
   CheckCircle2,
-  Loader2
+  Loader2,
+  Trash2
 } from "lucide-react";
 import { 
   collection, 
@@ -23,7 +24,9 @@ import {
   doc, 
   updateDoc,
   getDocs,
-  orderBy
+  orderBy,
+  deleteDoc,
+  getDoc
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { Course, Registration } from "../types";
@@ -41,6 +44,7 @@ export const RegistrantsList: React.FC = () => {
   const [filterTab, setFilterTab] = useState<"all" | "attended">("all");
   const [showQrModal, setShowQrModal] = useState(false);
   const [instructorMap, setInstructorMap] = useState<Record<string, string>>({});
+  const [deleteConfirm, setDeleteConfirm] = useState<{regId: string, courseId: string, sessionId: string | null} | null>(null);
 
   // Fetch instructors for mapping ID
   useEffect(() => {
@@ -156,6 +160,51 @@ export const RegistrantsList: React.FC = () => {
       toast.success(currentStatus ? "ยกเลิกการเช็คอิน" : "เช็คอินเรียบร้อย");
     } catch (error) {
       toast.error("เกิดข้อผิดพลาด");
+    }
+  };
+
+  const handleDeleteClick = (regId: string, courseId: string, sessionId: string | null) => {
+    setDeleteConfirm({ regId, courseId, sessionId });
+  };
+
+  const confirmDeleteRegistration = async () => {
+    if (!deleteConfirm) return;
+    const { regId, courseId, sessionId } = deleteConfirm;
+    setDeleteConfirm(null);
+
+    try {
+      // 1. Delete registration doc
+      await deleteDoc(doc(db, "registrations", regId));
+
+      // 2. Update course seats
+      const courseRef = doc(db, "courses", courseId);
+      const courseDoc = await getDoc(courseRef);
+      if (courseDoc.exists()) {
+        const currentCourse = courseDoc.data() as Course;
+        let updatedSessions = [...(currentCourse.sessions || [])];
+        let updateData: any = { sessions: updatedSessions };
+        
+        if (sessionId) {
+          const sessionIndex = updatedSessions.findIndex(s => s.sessionId === sessionId);
+          if (sessionIndex !== -1 && updatedSessions[sessionIndex].enrolledSeats > 0) {
+            updatedSessions[sessionIndex].enrolledSeats -= 1;
+          }
+        } else {
+          // Legacy course without session ID
+          if (updatedSessions.length > 0 && updatedSessions[0].enrolledSeats > 0) {
+            updatedSessions[0].enrolledSeats -= 1;
+          } else if (currentCourse.enrolledSeats !== undefined && currentCourse.enrolledSeats > 0) {
+            updateData.enrolledSeats = currentCourse.enrolledSeats - 1;
+          }
+        }
+        
+        await updateDoc(courseRef, updateData);
+      }
+
+      toast.success("ลบผู้ลงทะเบียนเรียบร้อยแล้ว");
+    } catch (error) {
+      console.error("Error deleting registration:", error);
+      toast.error("เกิดข้อผิดพลาดในการลบผู้ลงทะเบียน");
     }
   };
 
@@ -339,27 +388,36 @@ export const RegistrantsList: React.FC = () => {
                       <span className="text-[12px] lg:text-[13px] font-normal text-slate-400">{reg.userEmail}</span>
                     </td>
                     <td className="px-8 py-4 text-center">
-                      <button 
-                        onClick={() => toggleAttendance(reg.id, reg.attended)}
-                        className={cn(
-                          "inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-[12px] font-medium uppercase tracking-widest transition-all",
-                          reg.attended 
-                            ? "bg-emerald-50 text-emerald-600 border border-emerald-100" 
-                            : "bg-slate-50 text-slate-400 border border-slate-100 hover:border-crimson/30 hover:text-crimson"
-                        )}
-                      >
-                        {reg.attended ? (
-                          <>
-                            <CheckCircle2 className="w-3 h-3" />
-                            มาอบรมจริง
-                          </>
-                        ) : (
-                          <>
-                            <RefreshCw className="w-3 h-3" />
-                            ยังไม่ได้เช็คอิน
-                          </>
-                        )}
-                      </button>
+                      <div className="flex items-center justify-center gap-2">
+                        <button 
+                          onClick={() => toggleAttendance(reg.id, reg.attended)}
+                          className={cn(
+                            "inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-[12px] font-medium uppercase tracking-widest transition-all",
+                            reg.attended 
+                              ? "bg-emerald-50 text-emerald-600 border border-emerald-100" 
+                              : "bg-slate-50 text-slate-400 border border-slate-100 hover:border-crimson/30 hover:text-crimson"
+                          )}
+                        >
+                          {reg.attended ? (
+                            <>
+                              <CheckCircle2 className="w-3 h-3" />
+                              มาอบรมจริง
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw className="w-3 h-3" />
+                              ยังไม่ได้เช็คอิน
+                            </>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteClick(reg.id, reg.courseId, reg.sessionId || null)}
+                          className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                          title="ลบผู้ลงทะเบียน"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -414,6 +472,38 @@ export const RegistrantsList: React.FC = () => {
                 className="w-full py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-slate-800 transition-all shadow-lg"
               >
                 พิมพ์ QR Code
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Delete Confirmation Modal */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div 
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            onClick={() => setDeleteConfirm(null)}
+          />
+          <div className="relative bg-white rounded-3xl shadow-2xl p-8 max-w-sm w-full text-center">
+            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Trash2 className="w-8 h-8 text-red-500" />
+            </div>
+            <h3 className="text-xl font-bold text-slate-900 mb-2">ยืนยันการลบ</h3>
+            <p className="text-slate-500 mb-8">
+              คุณแน่ใจหรือไม่ว่าต้องการลบผู้ลงทะเบียนรายนี้? การกระทำนี้ไม่สามารถย้อนกลับได้
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDeleteConfirm(null)}
+                className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={confirmDeleteRegistration}
+                className="flex-1 py-3 px-4 bg-red-500 hover:bg-red-600 text-white font-medium rounded-xl transition-colors"
+              >
+                ยืนยันการลบ
               </button>
             </div>
           </div>

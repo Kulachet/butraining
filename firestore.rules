@@ -65,7 +65,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && 
-             request.auth.token.email.toLowerCase() == "kulachet.l@bu.ac.th" &&
+             request.auth.token.email.lower() == "kulachet.l@bu.ac.th" &&
              request.auth.token.email_verified == true;
     }
 
@@ -83,10 +83,7 @@ service cloud.firestore {
     // ===============================================================
 
     match /instructors/{instructorId} {
-      allow read: if isOwner(instructorId) || 
-                     isAdmin() || 
-                     (isAuthenticated() && resource.data.email == request.auth.token.email) ||
-                     (isAuthenticated() && resource.data.email.lower() == request.auth.token.email.lower());
+      allow read: if isAuthenticated();
       allow create: if (isOwner(instructorId) || isRequestOwner()) && isValidInstructor(request.resource.data);
       allow update: if (isOwner(instructorId) || isDocOwner() || (isAuthenticated() && resource.data.email == request.auth.token.email)) && isValidInstructor(request.resource.data);
     }
@@ -101,7 +98,7 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidRegistration(request.resource.data);
       allow update: if isAdmin();
-      allow delete: if isAdmin();
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
     }
 
     match /mail/{mailId} {

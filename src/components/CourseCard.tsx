@@ -28,11 +28,6 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, isLo
   const maxSeats = course.sessions?.reduce((sum, s) => sum + (s.maxSeats || 0), 0) || course.maxSeats || 0;
   let enrolledSeats = course.sessions?.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0) || course.enrolledSeats || 0;
   
-  // Fallback to totalRegistrations if it's greater (handles cases where enrolledSeats was reset by a bug)
-  if (course.totalRegistrations && course.totalRegistrations > enrolledSeats) {
-    enrolledSeats = course.totalRegistrations;
-  }
-  
   const availableSeats = Math.max(0, maxSeats - enrolledSeats);
   const isFull = maxSeats > 0 && availableSeats === 0;
 

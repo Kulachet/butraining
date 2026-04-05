@@ -78,7 +78,7 @@ export const CSVUploader: React.FC = () => {
           return {
             id: id.toString().trim(),
             name: (name || "ไม่ระบุชื่อ").toString().trim(),
-            email: email.toString().trim(),
+            email: email.toString().toLowerCase().trim(),
             department: (department || "ไม่ระบุหน่วยงาน").toString().trim(),
           };
         }).filter((inst): inst is CSVInstructor => inst !== null && !!inst.id && !!inst.email);
