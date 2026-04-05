@@ -27,14 +27,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
 
-  const checkInstructor = async (email: string, uid: string) => {
+  const checkInstructor = async (email: string, uid: string, displayName: string | null) => {
     try {
-      // 1. Try to find by email (Master Data Sync)
-      const q = query(collection(db, "instructors"), where("email", "==", email));
-      const querySnapshot = await getDocs(q);
+      const normalizedEmail = email.toLowerCase().trim();
       
+      // 1. Try to find by normalized email (Master Data Sync)
+      let q = query(collection(db, "instructors"), where("email", "==", normalizedEmail));
+      let querySnapshot = await getDocs(q);
+      
+      let instructorDoc = null;
+
       if (!querySnapshot.empty) {
-        const instructorDoc = querySnapshot.docs[0];
+        instructorDoc = querySnapshot.docs[0];
+      } else {
+        // Fallback: Try exact email match just in case it's stored with mixed casing
+        q = query(collection(db, "instructors"), where("email", "==", email.trim()));
+        querySnapshot = await getDocs(q);
+        if (!querySnapshot.empty) {
+          instructorDoc = querySnapshot.docs[0];
+        }
+      }
+
+      if (instructorDoc) {
         const docData = instructorDoc.data();
         
         // Link UID to this instructor record if not already linked
@@ -49,16 +63,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      // 2. Fallback to UID lookup (Manual Registration)
-      const docRef = doc(db, "instructors", uid);
-      const docSnap = await getDoc(docRef);
-      if (docSnap.exists()) {
-        setInstructor(docSnap.data() as Instructor);
-      } else {
-        setInstructor(null);
-      }
+      // If NO match is found: show the "Register" form as a fallback
+      // By setting instructor to null, the LandingPage will show the NewInstructorModal
+      setInstructor(null);
+      
     } catch (error) {
       console.error("Error fetching instructor:", error);
+      if (error instanceof Error && error.message.includes("Missing or insufficient permissions")) {
+        toast.error("ข้อผิดพลาดสิทธิ์การเข้าถึงฐานข้อมูล กรุณาติดต่อผู้ดูแลระบบ");
+      }
+      setInstructor(null);
     }
   };
 
@@ -74,7 +88,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } else {
           setUser(currentUser);
           console.log("Logged in as:", currentUser.email);
-          await checkInstructor(currentUser.email, currentUser.uid);
+          await checkInstructor(currentUser.email, currentUser.uid, currentUser.displayName);
           // Check admin status (simple check for now)
           const adminEmail = "kulachet.l@bu.ac.th";
           const isUserAdmin = currentUser.email?.toLowerCase() === adminEmail.toLowerCase();

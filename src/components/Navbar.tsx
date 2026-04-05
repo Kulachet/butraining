@@ -61,7 +61,10 @@ export const Navbar: React.FC = () => {
               </div>
             ) : (
               <button 
-                onClick={login}
+                onClick={async () => {
+                  await login();
+                  navigate("/");
+                }}
                 className="bg-crimson hover:bg-crimson-dark text-white text-sm font-medium px-6 py-2.5 rounded-xl shadow-lg shadow-crimson/10 transition-all flex items-center gap-2 tracking-wide"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

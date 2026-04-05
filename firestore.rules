@@ -83,10 +83,12 @@ service cloud.firestore {
     // ===============================================================
 
     match /instructors/{instructorId} {
-      allow read: if isOwner(instructorId) || isAdmin();
+      allow read: if isOwner(instructorId) || 
+                     isAdmin() || 
+                     (isAuthenticated() && resource.data.email == request.auth.token.email) ||
+                     (isAuthenticated() && resource.data.email.lower() == request.auth.token.email.lower());
       allow create: if (isOwner(instructorId) || isRequestOwner()) && isValidInstructor(request.resource.data);
-      allow update: if (isOwner(instructorId) || isDocOwner()) && isValidInstructor(request.resource.data) && 
-                      request.resource.data.email == resource.data.email;
+      allow update: if (isOwner(instructorId) || isDocOwner() || (isAuthenticated() && resource.data.email == request.auth.token.email)) && isValidInstructor(request.resource.data);
     }
 
     match /courses/{courseId} {
