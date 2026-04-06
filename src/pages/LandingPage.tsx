@@ -136,20 +136,20 @@ export const LandingPage: React.FC = () => {
 
       fetch(gasUrl, {
         method: "POST",
+        mode: "no-cors", // Add no-cors to bypass strict CORS on Netlify
         headers: {
           "Content-Type": "text/plain;charset=utf-8",
         },
         body: JSON.stringify(payload)
       })
-      .then(res => res.json())
-      .then(data => {
-        if(data.status === "success") {
-          toast.success("ส่งคำเชิญลงปฏิทินเรียบร้อยแล้ว กรุณาตรวจสอบอีเมล");
-        } else {
-          console.error("Calendar error:", data);
-        }
+      .then(() => {
+        // With no-cors, we can't read the JSON response, so we assume success if no network error
+        toast.success("ส่งคำเชิญลงปฏิทินเรียบร้อยแล้ว กรุณาตรวจสอบอีเมล");
       })
-      .catch(err => console.error("Calendar fetch error:", err));
+      .catch(err => {
+        console.error("Calendar fetch error:", err);
+        toast.error("ไม่สามารถส่งคำเชิญลงปฏิทินได้");
+      });
 
       setSelectedCourseForSession(null);
     } catch (error: any) {
