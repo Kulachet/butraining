@@ -11,7 +11,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { Search, Filter, Sparkles, Loader2, X, Clock, MapPin, CheckCircle2, AlertCircle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
-import { cn } from "../lib/utils";
+import { cn, generateGoogleCalendarUrl } from "../lib/utils";
 
 export const LandingPage: React.FC = () => {
   const navigate = useNavigate();
@@ -119,11 +119,37 @@ export const LandingPage: React.FC = () => {
       await RegistrationService.registerForCourse(course, instructor!, session);
       
       setUserRegistrations(prev => [...prev, course.id]);
-      toast.success("ลงทะเบียนสำเร็จ! ระบบกำลังเพิ่มกิจกรรมลงใน Google Calendar ของคุณ...");
+      toast.success("ลงทะเบียนสำเร็จ! ระบบกำลังส่งคำเชิญลงปฏิทินของคุณ...");
       
-      setTimeout(() => {
-        toast.success("เพิ่มกิจกรรมลงปฏิทินเรียบร้อยแล้ว");
-      }, 2000);
+      // Auto-send Calendar Invite via GAS
+      const gasUrl = "https://script.google.com/macros/s/AKfycbxXzAyeWdBdxVsGGysFapgWRJl_P7c-mro1w0-EYTMiQiPV0CzUfXwg0b-7RX_knXQ/exec";
+      const payload = {
+        courseTitle: course.title,
+        description: course.description || "",
+        instructorName: course.instructorName || "",
+        location: session?.locationDetail || course.locationDetail || "ไม่ระบุ",
+        guestEmail: instructor!.email,
+        date: session?.date || course.date,
+        startTime: session?.startTime || course.startTime || "09:00",
+        endTime: session?.endTime || course.endTime || "16:00"
+      };
+
+      fetch(gasUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8",
+        },
+        body: JSON.stringify(payload)
+      })
+      .then(res => res.json())
+      .then(data => {
+        if(data.status === "success") {
+          toast.success("ส่งคำเชิญลงปฏิทินเรียบร้อยแล้ว กรุณาตรวจสอบอีเมล");
+        } else {
+          console.error("Calendar error:", data);
+        }
+      })
+      .catch(err => console.error("Calendar fetch error:", err));
 
       setSelectedCourseForSession(null);
     } catch (error: any) {

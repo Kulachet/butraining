@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { collection, getDocs, query, orderBy, deleteDoc, doc } from "firebase/firestore";
+import { collection, getDocs, query, orderBy, deleteDoc, doc, updateDoc, where } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { Course, Instructor } from "../types";
 import { motion, AnimatePresence } from "motion/react";
@@ -16,7 +16,8 @@ import {
   ChevronDown,
   ArrowUpDown,
   Loader2,
-  BookOpen
+  BookOpen,
+  RefreshCw
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { cn, formatInstructorName } from "../lib/utils";
@@ -120,15 +121,91 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
     return result;
   }, [courses, search, statusFilter, instructorFilter, startDate, endDate, deptFilter, sortBy]);
 
-  const handleDelete = async (id: string) => {
-    if (!window.confirm("คุณแน่ใจหรือไม่ว่าต้องการลบหลักสูตรนี้?")) return;
-    try {
-      await deleteDoc(doc(db, "courses", id));
-      setCourses(courses.filter(c => c.id !== id));
-      toast.success("ลบหลักสูตรเรียบร้อยแล้ว");
-    } catch (error) {
-      toast.error("ลบไม่สำเร็จ");
-    }
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
+
+  const handleDeleteClick = (id: string) => {
+    setConfirmModal({
+      isOpen: true,
+      title: "ยืนยันการลบหลักสูตร",
+      message: "คุณแน่ใจหรือไม่ว่าต้องการลบหลักสูตรนี้? การกระทำนี้ไม่สามารถย้อนกลับได้",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await deleteDoc(doc(db, "courses", id));
+          setCourses(courses.filter(c => c.id !== id));
+          toast.success("ลบหลักสูตรเรียบร้อยแล้ว");
+        } catch (error) {
+          toast.error("ลบไม่สำเร็จ");
+        }
+      }
+    });
+  };
+
+  const handleSyncClick = () => {
+    setConfirmModal({
+      isOpen: true,
+      title: "ยืนยันการคำนวณที่นั่ง",
+      message: "คุณต้องการคำนวณที่นั่งใหม่ทั้งหมดให้ตรงกับจำนวนผู้ลงทะเบียนจริงหรือไม่?",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          toast.loading("กำลังคำนวณที่นั่ง...", { id: "sync" });
+          
+          for (const course of courses) {
+            // Get all registrations for this course
+            const regsSnap = await getDocs(query(collection(db, "registrations"), where("courseId", "==", course.id)));
+            const regs = regsSnap.docs.map(d => d.data());
+            
+            let updatedSessions = [...(course.sessions || [])];
+            let hasChanges = false;
+            
+            if (updatedSessions.length > 0) {
+              // Count registrations per session
+              const sessionCounts: Record<string, number> = {};
+              regs.forEach(r => {
+                const sid = r.sessionId || updatedSessions[0].sessionId;
+                sessionCounts[sid] = (sessionCounts[sid] || 0) + 1;
+              });
+              
+              updatedSessions = updatedSessions.map(s => {
+                const actualCount = sessionCounts[s.sessionId] || 0;
+                if (s.enrolledSeats !== actualCount) {
+                  hasChanges = true;
+                  return { ...s, enrolledSeats: actualCount };
+                }
+                return s;
+              });
+            } else {
+              // Legacy course
+              if (course.enrolledSeats !== regs.length) {
+                hasChanges = true;
+              }
+            }
+            
+            if (hasChanges) {
+              const updateData: any = { sessions: updatedSessions };
+              if (updatedSessions.length === 0) {
+                updateData.enrolledSeats = regs.length;
+              }
+              await updateDoc(doc(db, "courses", course.id), updateData);
+            }
+          }
+          
+          toast.success("คำนวณที่นั่งใหม่เรียบร้อยแล้ว", { id: "sync" });
+          // Refresh data
+          const coursesSnap = await getDocs(query(collection(db, "courses"), orderBy("createdAt", "desc")));
+          setCourses(coursesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Course[]);
+        } catch (error) {
+          console.error(error);
+          toast.error("เกิดข้อผิดพลาด", { id: "sync" });
+        }
+      }
+    });
   };
 
   if (loading) {
@@ -143,15 +220,25 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
   return (
     <div className="space-y-8">
       {/* Top Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <h1 className="text-[28px] lg:text-[32px] font-bold text-[#333333] tracking-[0.02em] leading-[1.6]">Manage Training Courses</h1>
-        <button 
-          onClick={onCreateCourse}
-          className="bg-crimson hover:bg-crimson-dark text-white font-medium px-8 py-4 rounded-2xl shadow-lg shadow-crimson/10 transition-all flex items-center gap-2 text-[14px] lg:text-[16px] tracking-wide"
-        >
-          <Plus className="w-6 h-6" />
-          Create Training Course
-        </button>
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={handleSyncClick}
+            className="bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 font-medium px-6 py-4 rounded-2xl shadow-sm transition-all flex items-center gap-2 text-[14px] lg:text-[16px] tracking-wide"
+            title="คำนวณที่นั่งใหม่ทั้งหมดให้ตรงกับจำนวนผู้ลงทะเบียนจริง"
+          >
+            <RefreshCw className="w-5 h-5" />
+            Sync Seats
+          </button>
+          <button 
+            onClick={onCreateCourse}
+            className="bg-crimson hover:bg-crimson-dark text-white font-medium px-8 py-4 rounded-2xl shadow-lg shadow-crimson/10 transition-all flex items-center gap-2 text-[14px] lg:text-[16px] tracking-wide"
+          >
+            <Plus className="w-6 h-6" />
+            Create Training Course
+          </button>
+        </div>
       </div>
 
       {/* Filtering Bar */}
@@ -291,11 +378,13 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
                   <span className="text-[11px] font-medium text-slate-400 uppercase tracking-widest leading-[1.6]">Total Seats</span>
                   <span className="text-[13px] lg:text-[14px] font-normal text-[#4A4A4A] tracking-wide leading-[1.7]">
                     {(() => {
-                      let totalEnrolled = course.sessions?.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0) || 0;
-                      if (course.totalRegistrations && course.totalRegistrations > totalEnrolled) {
-                        totalEnrolled = course.totalRegistrations;
-                      }
-                      const totalMax = course.sessions?.reduce((sum, s) => sum + (s.maxSeats || 0), 0) || course.maxSeats || 50;
+                      const hasSessions = course.sessions && course.sessions.length > 0;
+                      const totalEnrolled = hasSessions 
+                        ? course.sessions!.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0) 
+                        : (course.enrolledSeats || 0);
+                      const totalMax = hasSessions 
+                        ? course.sessions!.reduce((sum, s) => sum + (s.maxSeats || 0), 0) 
+                        : (course.maxSeats || 50);
                       return (
                         <>
                           {totalEnrolled}/{totalMax} 
@@ -348,7 +437,7 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
                   Edit Course
                 </button>
                 <button 
-                  onClick={() => handleDelete(course.id)}
+                  onClick={() => handleDeleteClick(course.id)}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-50 hover:border-red-500 hover:text-red-500 text-red-400 rounded-xl text-[14px] lg:text-[16px] font-medium transition-all tracking-wide leading-[1.7]"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -368,6 +457,39 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
           )}
         </AnimatePresence>
       </div>
+      {/* Confirm Modal */}
+      <AnimatePresence>
+        {confirmModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl"
+            >
+              <h3 className="text-xl font-bold text-[#333333] mb-2">{confirmModal.title}</h3>
+              <p className="text-[#4A4A4A] mb-8 leading-relaxed">
+                {confirmModal.message}
+              </p>
+              
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  onClick={() => setConfirmModal(null)}
+                  className="px-6 py-2.5 rounded-xl font-medium text-slate-600 hover:bg-slate-100 transition-colors"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  onClick={confirmModal.onConfirm}
+                  className="px-6 py-2.5 rounded-xl font-medium text-white bg-crimson hover:bg-crimson-dark shadow-lg shadow-crimson/20 transition-all"
+                >
+                  ยืนยัน
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

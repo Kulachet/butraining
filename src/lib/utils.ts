@@ -36,3 +36,29 @@ export function formatDateThai(dateString: string | undefined): string {
     return dateString;
   }
 }
+
+export function generateGoogleCalendarUrl(course: any, session?: any): string {
+  const title = encodeURIComponent(`[Training] ${course.title}`);
+  const details = encodeURIComponent(`${course.description || ''}\n\nวิทยากร: ${course.instructorName}`);
+  
+  const targetDate = session?.date || course.date;
+  const targetStartTime = session?.startTime || course.startTime || '09:00';
+  const targetEndTime = session?.endTime || course.endTime || '16:00';
+  const location = encodeURIComponent(session?.locationDetail || course.locationDetail || '');
+
+  const formatDate = (dateStr: string, timeStr: string) => {
+    // Assuming Thai timezone (+07:00) for the input
+    const d = new Date(`${dateStr}T${timeStr}:00+07:00`);
+    if (isNaN(d.getTime())) return '';
+    return d.toISOString().replace(/-|:|\.\d+/g, '');
+  };
+
+  try {
+    const start = formatDate(targetDate, targetStartTime);
+    const end = formatDate(targetDate, targetEndTime);
+    if (!start || !end) throw new Error("Invalid date");
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${start}/${end}&details=${details}&location=${location}`;
+  } catch (e) {
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&details=${details}&location=${location}`;
+  }
+}
