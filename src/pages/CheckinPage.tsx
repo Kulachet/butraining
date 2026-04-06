@@ -63,9 +63,21 @@ export const CheckinPage: React.FC = () => {
           setMessage("คุณได้เช็คอินเรียบร้อยแล้วก่อนหน้านี้");
         } else {
           // 3. Update Attendance
+          // Find max checkInSequenceNumber for this course
+          const allRegsQ = query(collection(db, "registrations"), where("courseId", "==", courseId));
+          const allRegsSnap = await getDocs(allRegsQ);
+          let maxCheckInSeq = 0;
+          allRegsSnap.forEach(doc => {
+            const data = doc.data() as Registration;
+            if (data.checkInSequenceNumber && data.checkInSequenceNumber > maxCheckInSeq) {
+              maxCheckInSeq = data.checkInSequenceNumber;
+            }
+          });
+
           await updateDoc(regRef, {
             attended: true,
-            attendedAt: new Date().toISOString()
+            checkInAt: new Date().toISOString(),
+            checkInSequenceNumber: maxCheckInSeq + 1
           });
           setStatus("success");
           setMessage("เช็คอินสำเร็จ! ยินดีต้อนรับเข้าสู่การอบรม");

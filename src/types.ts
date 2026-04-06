@@ -55,6 +55,8 @@ export interface Registration {
   userPosition: string;
   userDepartment: string;
   sequenceNumber: number;
+  checkInSequenceNumber?: number;
+  checkInAt?: string;
   attended: boolean;
   registeredAt: string;
 }

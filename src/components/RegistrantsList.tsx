@@ -43,6 +43,9 @@ export const RegistrantsList: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterTab, setFilterTab] = useState<"all" | "attended">("all");
   const [showQrModal, setShowQrModal] = useState(false);
+  const [showCertModal, setShowCertModal] = useState(false);
+  const [certFolderId, setCertFolderId] = useState("");
+  const [certRecipients, setCertRecipients] = useState<Registration[]>([]);
   const [instructorMap, setInstructorMap] = useState<Record<string, string>>({});
   const [deleteConfirm, setDeleteConfirm] = useState<{regId: string, courseId: string, sessionId: string | null} | null>(null);
 
@@ -122,12 +125,14 @@ export const RegistrantsList: React.FC = () => {
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
     const data = filteredRegistrations.map(reg => ({
       "ลำดับ": reg.sequenceNumber,
+      "ลำดับการเช็คอิน": reg.checkInSequenceNumber || "-",
       "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
       "ชื่อ-นามสกุล": formatInstructorName(reg.userName),
       "อีเมล": reg.userEmail,
       "หน่วยงาน": reg.userDepartment,
       "ตำแหน่ง": reg.userPosition,
       "สถานะการเข้าอบรม": reg.attended ? "มาอบรมจริง" : "ยังไม่ได้เช็คอิน",
+      "เวลาเช็คอิน": reg.checkInAt ? new Date(reg.checkInAt).toLocaleString('th-TH') : "-",
       "วันที่ลงทะเบียน": new Date(reg.registeredAt).toLocaleString('th-TH')
     }));
 
@@ -144,6 +149,109 @@ export const RegistrantsList: React.FC = () => {
     toast.success("ส่งออกไฟล์ CSV เรียบร้อยแล้ว");
   };
 
+  const handleReorderSequence = async () => {
+    if (!selectedCourseId) {
+      toast.error("กรุณาเลือกหลักสูตรก่อน");
+      return;
+    }
+    if (registrations.length === 0) {
+      toast.error("ไม่มีผู้ลงทะเบียนในหลักสูตรนี้");
+      return;
+    }
+    
+    setLoading(true);
+    try {
+      // Sort registrations by registeredAt
+      const sortedRegs = [...registrations].sort((a, b) => {
+        return new Date(a.registeredAt).getTime() - new Date(b.registeredAt).getTime();
+      });
+      
+      // Update each document with a new sequential number
+      let seq = 1;
+      const updatePromises = sortedRegs.map(reg => {
+        return updateDoc(doc(db, "registrations", reg.id), {
+          sequenceNumber: seq++
+        });
+      });
+      
+      await Promise.all(updatePromises);
+      toast.success("ปรับปรุงลำดับที่เรียบร้อยแล้ว");
+    } catch (error) {
+      console.error("Error reordering sequence:", error);
+      toast.error("เกิดข้อผิดพลาดในการปรับปรุงลำดับที่");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRemoveCertRecipient = (regId: string) => {
+    setCertRecipients(prev => prev.filter(r => r.id !== regId));
+  };
+
+  const handleSendCertificates = async () => {
+    if (!selectedCourseId) {
+      toast.error("กรุณาเลือกหลักสูตรก่อน");
+      return;
+    }
+
+    if (certRecipients.length === 0) {
+      toast.error("ไม่มีผู้รับใบ Certificate ในรายการ");
+      return;
+    }
+    
+    if (!certFolderId) {
+      toast.error("กรุณาระบุ Folder ID หรือ URL ของ Google Drive");
+      return;
+    }
+
+    // Extract ID if URL is pasted
+    let folderId = certFolderId;
+    const match = certFolderId.match(/folders\/([a-zA-Z0-9-_]+)/);
+    if (match) {
+      folderId = match[1];
+    } else if (certFolderId.includes("id=")) {
+      const urlParams = new URLSearchParams(certFolderId.substring(certFolderId.indexOf('?')));
+      folderId = urlParams.get("id") || certFolderId;
+    }
+
+    const selectedCourse = courses.find(c => c.id === selectedCourseId);
+
+    const payload = {
+      action: "send_certificates",
+      folderId: folderId,
+      courseTitle: selectedCourse?.title || "หลักสูตรอบรม",
+      recipients: certRecipients.map(r => ({
+        email: r.userEmail,
+        name: formatInstructorName(r.userName),
+        sequence: r.checkInSequenceNumber
+      }))
+    };
+
+    // Using the same GAS URL from LandingPage
+    const gasUrl = "https://script.google.com/macros/s/AKfycbwrGYQHhxs4OU6_EDBrLrBf0Os3IecuSO6KnkgDARvDr-I0REB63Es9RwtBtacB9x8/exec";
+
+    try {
+      toast.loading("กำลังสั่งการส่งอีเมล...", { id: "send_cert" });
+      fetch(gasUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8",
+        },
+        body: JSON.stringify(payload)
+      }).then(() => {
+        toast.success("ระบบกำลังทยอยส่งใบ Certificate กรุณาตรวจสอบในอีเมล", { id: "send_cert" });
+        setShowCertModal(false);
+        setCertFolderId("");
+      }).catch(err => {
+        console.error(err);
+        toast.error("เกิดข้อผิดพลาดในการส่ง", { id: "send_cert" });
+      });
+    } catch (error) {
+      toast.error("เกิดข้อผิดพลาด", { id: "send_cert" });
+    }
+  };
+
   const handleAction = (action: string) => {
     if (!selectedCourseId) {
       toast.error("กรุณาเลือกหลักสูตรก่อน");
@@ -154,10 +262,27 @@ export const RegistrantsList: React.FC = () => {
 
   const toggleAttendance = async (regId: string, currentStatus: boolean) => {
     try {
-      await updateDoc(doc(db, "registrations", regId), {
-        attended: !currentStatus
-      });
-      toast.success(currentStatus ? "ยกเลิกการเช็คอิน" : "เช็คอินเรียบร้อย");
+      if (!currentStatus) {
+        // Checking in
+        const maxCheckInSeq = registrations.reduce((max, reg) => {
+           return (reg.checkInSequenceNumber || 0) > max ? (reg.checkInSequenceNumber || 0) : max;
+        }, 0);
+        
+        await updateDoc(doc(db, "registrations", regId), {
+          attended: true,
+          checkInAt: new Date().toISOString(),
+          checkInSequenceNumber: maxCheckInSeq + 1
+        });
+        toast.success("เช็คอินเรียบร้อย");
+      } else {
+        // Un-checking in
+        await updateDoc(doc(db, "registrations", regId), {
+          attended: false,
+          checkInAt: null,
+          checkInSequenceNumber: null
+        });
+        toast.success("ยกเลิกการเช็คอิน");
+      }
     } catch (error) {
       toast.error("เกิดข้อผิดพลาด");
     }
@@ -224,7 +349,19 @@ export const RegistrantsList: React.FC = () => {
         {/* Action Buttons Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           <button 
-            onClick={() => handleAction("ส่งใบ Certificate")}
+            onClick={() => {
+              if (!selectedCourseId) {
+                toast.error("กรุณาเลือกหลักสูตรก่อน");
+                return;
+              }
+              const attendees = filteredRegistrations.filter(r => r.attended && r.checkInSequenceNumber);
+              if (attendees.length === 0) {
+                toast.error("ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว");
+                return;
+              }
+              setCertRecipients(attendees);
+              setShowCertModal(true);
+            }}
             className="flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#4A4A4A] rounded-xl text-[13px] font-medium transition-all border border-slate-200"
           >
             <Award className="w-4 h-4" />
@@ -272,7 +409,7 @@ export const RegistrantsList: React.FC = () => {
             ส่งออก รายชื่อสมัคร (CSV)
           </button>
           <button 
-            onClick={() => handleAction("ปรับปรุงลำดับที่")}
+            onClick={handleReorderSequence}
             className="flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#4A4A4A] rounded-xl text-[13px] font-medium transition-all border border-slate-200"
           >
             <RefreshCw className="w-4 h-4" />
@@ -352,7 +489,8 @@ export const RegistrantsList: React.FC = () => {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50/50 border-b border-slate-100">
-                  <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับ</th>
+                  <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับสมัคร</th>
+                  <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับเช็คอิน</th>
                   <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">รหัสอาจารย์</th>
                   <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ชื่อ-นามสกุล</th>
                   <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">หน่วยงาน</th>
@@ -367,6 +505,17 @@ export const RegistrantsList: React.FC = () => {
                       <span className="text-[14px] lg:text-[16px] font-bold text-slate-300 group-hover:text-crimson transition-colors">
                         {String(reg.sequenceNumber).padStart(2, '0')}
                       </span>
+                    </td>
+                    <td className="px-8 py-4">
+                      {reg.checkInSequenceNumber ? (
+                        <span className="text-[14px] lg:text-[16px] font-bold text-emerald-500">
+                          {String(reg.checkInSequenceNumber).padStart(2, '0')}
+                        </span>
+                      ) : (
+                        <span className="text-[14px] lg:text-[16px] font-bold text-slate-200">
+                          -
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-4">
                       <span className="text-[12px] lg:text-[13px] font-mono font-medium text-slate-400">
@@ -477,6 +626,112 @@ export const RegistrantsList: React.FC = () => {
           </div>
         </div>
       )}
+      {/* Certificate Modal */}
+      {showCertModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div 
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            onClick={() => setShowCertModal(false)}
+          />
+          <div className="relative bg-white rounded-3xl shadow-2xl p-8 max-w-2xl w-full max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-center mb-6">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center">
+                  <Award className="w-5 h-5 text-indigo-600" />
+                </div>
+                <h3 className="text-xl font-bold text-slate-900">ส่งใบ Certificate</h3>
+              </div>
+              <button 
+                onClick={() => setShowCertModal(false)}
+                className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+              >
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+            
+            <div className="overflow-y-auto flex-1 pr-2 space-y-6 mb-6">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-700 mb-1">หลักสูตร:</h4>
+                <p className="text-indigo-600 font-medium">{courses.find(c => c.id === selectedCourseId)?.title}</p>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-end mb-2">
+                  <h4 className="text-sm font-semibold text-slate-700">รายชื่อผู้รับ ({certRecipients.length} คน)</h4>
+                </div>
+                <div className="border border-slate-200 rounded-xl overflow-hidden flex flex-col max-h-[40vh]">
+                  <div className="overflow-x-auto overflow-y-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
+                        <tr>
+                          <th className="px-4 py-3 font-medium text-slate-500 w-28">ลำดับเช็คอิน</th>
+                          <th className="px-4 py-3 font-medium text-slate-500">ชื่อ-นามสกุล</th>
+                          <th className="px-4 py-3 font-medium text-slate-500 text-center w-24">จัดการ</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {certRecipients.map(rec => (
+                          <tr key={rec.id} className="hover:bg-slate-50">
+                            <td className="px-4 py-2 text-emerald-600 font-bold">{rec.checkInSequenceNumber}</td>
+                            <td className="px-4 py-2 text-slate-700">{formatInstructorName(rec.userName)}</td>
+                            <td className="px-4 py-2 text-center">
+                              <button 
+                                onClick={() => handleRemoveCertRecipient(rec.id)}
+                                className="text-red-400 hover:text-red-600 p-1.5 rounded-md hover:bg-red-50 transition-colors mx-auto block"
+                                title="ลบออกจากรายการส่ง"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {certRecipients.length === 0 && (
+                          <tr>
+                            <td colSpan={3} className="px-4 py-8 text-center text-slate-400">ไม่มีรายชื่อผู้รับ</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-700">
+                  Google Drive Folder ID หรือ URL
+                </label>
+                <input 
+                  type="text"
+                  value={certFolderId}
+                  onChange={(e) => setCertFolderId(e.target.value)}
+                  placeholder="เช่น 1A2b3C4d5E6f7G8h9I0j..."
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
+                />
+                <p className="text-xs text-slate-500">
+                  * โฟลเดอร์ต้องตั้งค่าแชร์เป็น "Anyone with the link" และชื่อไฟล์ต้องตรงกับลำดับเช็คอิน (เช่น 1.pdf)
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 pt-4 border-t border-slate-100 mt-auto">
+              <button
+                onClick={() => setShowCertModal(false)}
+                className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={handleSendCertificates}
+                disabled={certRecipients.length === 0}
+                className="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-medium rounded-xl transition-colors shadow-md shadow-indigo-200"
+              >
+                ยืนยันการส่ง
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete Confirmation Modal */}
       {deleteConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
