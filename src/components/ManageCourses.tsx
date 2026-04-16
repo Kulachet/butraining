@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { collection, getDocs, query, orderBy, deleteDoc, doc, updateDoc, where } from "firebase/firestore";
+import { collection, getDocs, query, orderBy, deleteDoc, doc, updateDoc, where, onSnapshot, getDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { Course, Instructor } from "../types";
 import { motion, AnimatePresence } from "motion/react";
@@ -43,21 +43,28 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
   const [sortBy, setSortBy] = useState("Training Date (Earliest)");
 
   useEffect(() => {
-    const fetchData = async () => {
+    // Real-time listener for courses
+    const q = query(collection(db, "courses"), orderBy("createdAt", "desc"));
+    const unsubscribeCourses = onSnapshot(q, (snapshot) => {
+      setCourses(snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as Course[]);
+      setLoading(false);
+    }, (error) => {
+      console.error("Error fetching courses:", error);
+      setLoading(false);
+    });
+
+    // Fetch instructors (one-time is fine for mapping)
+    const fetchInstructors = async () => {
       try {
-        const coursesSnap = await getDocs(query(collection(db, "courses"), orderBy("createdAt", "desc")));
         const instructorsSnap = await getDocs(collection(db, "instructors"));
-        
-        setCourses(coursesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Course[]);
         setInstructors(instructorsSnap.docs.map(d => ({ uid: d.id, ...d.data() })) as Instructor[]);
       } catch (error) {
-        console.error("Error fetching data:", error);
-        toast.error("ไม่สามารถโหลดข้อมูลได้");
-      } finally {
-        setLoading(false);
+        console.error("Error fetching instructors:", error);
       }
     };
-    fetchData();
+    fetchInstructors();
+
+    return () => unsubscribeCourses();
   }, []);
 
   const departments = useMemo(() => {
@@ -156,22 +163,34 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
         try {
           toast.loading("กำลังคำนวณที่นั่ง...", { id: "sync" });
           
-          for (const course of courses) {
-            // Get all registrations for this course
+          // Fetch fresh courses list to avoid stale state issues
+          const freshCoursesSnap = await getDocs(query(collection(db, "courses")));
+          const freshCourses = freshCoursesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Course[];
+
+          for (const course of freshCourses) {
+            // 1. Get ALL registrations for this course to get the absolute truth
             const regsSnap = await getDocs(query(collection(db, "registrations"), where("courseId", "==", course.id)));
-            const regs = regsSnap.docs.map(d => d.data());
+            const totalActualRegs = regsSnap.docs.length;
             
             let updatedSessions = [...(course.sessions || [])];
             let hasChanges = false;
             
             if (updatedSessions.length > 0) {
-              // Count registrations per session
+              // 2. Count registrations per session
               const sessionCounts: Record<string, number> = {};
-              regs.forEach(r => {
-                const sid = r.sessionId || updatedSessions[0].sessionId;
+              const validSessionIds = updatedSessions.map(s => s.sessionId);
+              
+              regsSnap.docs.forEach(doc => {
+                const r = doc.data();
+                let sid = r.sessionId;
+                // If session ID is missing or invalid, attribute it to the first session
+                if (!sid || !validSessionIds.includes(sid)) {
+                  sid = updatedSessions[0].sessionId;
+                }
                 sessionCounts[sid] = (sessionCounts[sid] || 0) + 1;
               });
               
+              // 3. Update each session's count
               updatedSessions = updatedSessions.map(s => {
                 const actualCount = sessionCounts[s.sessionId] || 0;
                 if (s.enrolledSeats !== actualCount) {
@@ -180,29 +199,30 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
                 }
                 return s;
               });
-            } else {
-              // Legacy course
-              if (course.enrolledSeats !== regs.length) {
-                hasChanges = true;
-              }
+            }
+
+            // 4. Check if summary fields need update
+            if (course.enrolledSeats !== totalActualRegs) {
+              hasChanges = true;
+            }
+
+            if (course.totalRegistrations !== totalActualRegs) {
+              hasChanges = true;
             }
             
             if (hasChanges) {
-              const updateData: any = { sessions: updatedSessions };
-              if (updatedSessions.length === 0) {
-                updateData.enrolledSeats = regs.length;
-              }
-              await updateDoc(doc(db, "courses", course.id), updateData);
+              await updateDoc(doc(db, "courses", course.id), { 
+                sessions: updatedSessions,
+                enrolledSeats: totalActualRegs,
+                totalRegistrations: totalActualRegs
+              });
             }
           }
           
           toast.success("คำนวณที่นั่งใหม่เรียบร้อยแล้ว", { id: "sync" });
-          // Refresh data
-          const coursesSnap = await getDocs(query(collection(db, "courses"), orderBy("createdAt", "desc")));
-          setCourses(coursesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Course[]);
         } catch (error) {
-          console.error(error);
-          toast.error("เกิดข้อผิดพลาด", { id: "sync" });
+          console.error("Sync error:", error);
+          toast.error("เกิดข้อผิดพลาดในการปรับปรุงข้อมูล", { id: "sync" });
         }
       }
     });

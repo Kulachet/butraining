@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { collection, getDocs, query, orderBy, where } from "firebase/firestore";
+import { collection, getDocs, query, orderBy, where, onSnapshot } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { Course, Session } from "../types";
 import { useAuth } from "../components/AuthProvider";
@@ -32,53 +32,58 @@ export const LandingPage: React.FC = () => {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        // Fetch all courses
-        const q = query(
-          collection(db, "courses"), 
-          orderBy("date", "asc")
-        );
-        const querySnapshot = await getDocs(q);
-        const fetchedCourses = querySnapshot.docs
-          .map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          }))
-          .filter((course: any) => course.isVisible !== false)
-          .sort((a: any, b: any) => {
-            // Sort by date first
-            const dateA = new Date(a.date).getTime();
-            const dateB = new Date(b.date).getTime();
-            if (dateA !== dateB) {
-              return dateA - dateB;
-            }
-            // If dates are equal, sort by start time
-            const timeA = a.startTime || a.sessions?.[0]?.startTime || "00:00";
-            const timeB = b.startTime || b.sessions?.[0]?.startTime || "00:00";
-            return timeA.localeCompare(timeB);
-          }) as Course[];
-        
-        setCourses(fetchedCourses);
+    // Real-time listener for courses
+    const q = query(
+      collection(db, "courses"), 
+      orderBy("date", "asc")
+    );
+    
+    const unsubscribeCourses = onSnapshot(q, (querySnapshot) => {
+      const fetchedCourses = querySnapshot.docs
+        .map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }))
+        .filter((course: any) => course.isVisible !== false)
+        .sort((a: any, b: any) => {
+          const dateA = new Date(a.date).getTime();
+          const dateB = new Date(b.date).getTime();
+          if (dateA !== dateB) return dateA - dateB;
+          const timeA = a.startTime || a.sessions?.[0]?.startTime || "00:00";
+          const timeB = b.startTime || b.sessions?.[0]?.startTime || "00:00";
+          return timeA.localeCompare(timeB);
+        }) as Course[];
+      
+      setCourses(fetchedCourses);
+      setLoading(false);
+    }, (error) => {
+      console.error("Error fetching courses:", error);
+      setLoading(false);
+    });
 
-        // Fetch user registrations if logged in
-        if (user) {
-          const regQ = query(
-            collection(db, "registrations"),
-            where("userId", "==", user.uid)
-          );
-          const regSnapshot = await getDocs(regQ);
-          const registeredCourseIds = regSnapshot.docs.map(doc => doc.data().courseId);
-          setUserRegistrations(registeredCourseIds);
-        }
-      } catch (error) {
-        console.error("Error fetching data:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
+    return () => unsubscribeCourses();
+  }, []);
 
-    fetchData();
+  useEffect(() => {
+    if (!user) {
+      setUserRegistrations([]);
+      return;
+    }
+
+    // Real-time listener for user registrations
+    const regQ = query(
+      collection(db, "registrations"),
+      where("userId", "==", user.uid)
+    );
+    
+    const unsubscribeRegs = onSnapshot(regQ, (regSnapshot) => {
+      const registeredCourseIds = regSnapshot.docs.map(doc => doc.data().courseId);
+      setUserRegistrations(registeredCourseIds);
+    }, (error) => {
+      console.error("Error fetching registrations:", error);
+    });
+
+    return () => unsubscribeRegs();
   }, [user]);
 
   useEffect(() => {

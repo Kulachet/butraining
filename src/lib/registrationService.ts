@@ -33,6 +33,8 @@ export const RegistrationService = {
       
       // 3. Update session seats if applicable
       let updatedSessions = [...(currentCourse.sessions || [])];
+      let enrolledSeats = currentCourse.enrolledSeats || 0;
+
       if (session) {
         const sessionIndex = updatedSessions.findIndex(s => s.sessionId === session.sessionId);
         if (sessionIndex === -1) throw new Error("Session not found");
@@ -42,6 +44,12 @@ export const RegistrationService = {
         }
         
         updatedSessions[sessionIndex].enrolledSeats += 1;
+      } else {
+        // Legacy course or single session without explicit session selection
+        if (enrolledSeats >= (currentCourse.maxSeats || 50)) {
+          throw new Error("Course is full");
+        }
+        enrolledSeats += 1;
       }
 
       // 4. Update sequence number
@@ -50,6 +58,7 @@ export const RegistrationService = {
       // 5. Update course document
       transaction.update(courseRef, { 
         sessions: updatedSessions,
+        enrolledSeats: enrolledSeats,
         totalRegistrations: nextSequence
       });
 
@@ -93,13 +102,26 @@ export const RegistrationService = {
 
       // 3. Update session seats
       let updatedSessions = [...(currentCourse.sessions || [])];
+      let enrolledSeats = currentCourse.enrolledSeats || 0;
+
       if (regData.sessionId) {
-        const sessionIndex = updatedSessions.findIndex(s => s.sessionId === regData.sessionId);
+        let sessionIndex = updatedSessions.findIndex(s => s.sessionId === regData.sessionId);
+        
+        // If session ID not found (orphaned), default to the first session if available
+        if (sessionIndex === -1 && updatedSessions.length > 0) {
+          sessionIndex = 0;
+        }
+
         if (sessionIndex !== -1 && updatedSessions[sessionIndex].enrolledSeats > 0) {
           updatedSessions[sessionIndex].enrolledSeats -= 1;
         }
-      } else if (updatedSessions.length > 0 && updatedSessions[0].enrolledSeats > 0) {
-        updatedSessions[0].enrolledSeats -= 1;
+      } else {
+        // Legacy course or single session
+        if (updatedSessions.length > 0 && updatedSessions[0].enrolledSeats > 0) {
+          updatedSessions[0].enrolledSeats -= 1;
+        } else if (enrolledSeats > 0) {
+          enrolledSeats -= 1;
+        }
       }
 
       // 4. Update total registrations to keep fallback logic correct
@@ -108,6 +130,7 @@ export const RegistrationService = {
       // 5. Update course document
       transaction.update(courseRef, { 
         sessions: updatedSessions,
+        enrolledSeats: enrolledSeats,
         totalRegistrations: newTotal
       });
 

@@ -37,6 +37,11 @@ export interface Course {
   isVisible: boolean;
   sessions: Session[];
   totalRegistrations?: number;
+  maxSeats?: number;
+  enrolledSeats?: number;
+  locationDetail?: string;
+  startTime?: string;
+  endTime?: string;
   department?: string;
   createdAt: string;
   updatedAt?: string;

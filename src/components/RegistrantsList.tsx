@@ -307,23 +307,37 @@ export const RegistrantsList: React.FC = () => {
       if (courseDoc.exists()) {
         const currentCourse = courseDoc.data() as Course;
         let updatedSessions = [...(currentCourse.sessions || [])];
-        let updateData: any = { sessions: updatedSessions };
+        let enrolledSeats = currentCourse.enrolledSeats || 0;
+        let totalRegistrations = currentCourse.totalRegistrations || 0;
         
         if (sessionId) {
-          const sessionIndex = updatedSessions.findIndex(s => s.sessionId === sessionId);
+          let sessionIndex = updatedSessions.findIndex(s => s.sessionId === sessionId);
+          
+          // If session ID not found (orphaned), default to the first session if available
+          if (sessionIndex === -1 && updatedSessions.length > 0) {
+            sessionIndex = 0;
+          }
+
           if (sessionIndex !== -1 && updatedSessions[sessionIndex].enrolledSeats > 0) {
             updatedSessions[sessionIndex].enrolledSeats -= 1;
           }
         } else {
-          // Legacy course without session ID
+          // Legacy course or single session
           if (updatedSessions.length > 0 && updatedSessions[0].enrolledSeats > 0) {
             updatedSessions[0].enrolledSeats -= 1;
-          } else if (currentCourse.enrolledSeats !== undefined && currentCourse.enrolledSeats > 0) {
-            updateData.enrolledSeats = currentCourse.enrolledSeats - 1;
+          } else if (enrolledSeats > 0) {
+            enrolledSeats -= 1;
           }
         }
+
+        // Also decrement totalRegistrations to keep it in sync
+        totalRegistrations = Math.max(0, totalRegistrations - 1);
         
-        await updateDoc(courseRef, updateData);
+        await updateDoc(courseRef, { 
+          sessions: updatedSessions,
+          enrolledSeats: enrolledSeats,
+          totalRegistrations: totalRegistrations
+        });
       }
 
       toast.success("ลบผู้ลงทะเบียนเรียบร้อยแล้ว");
