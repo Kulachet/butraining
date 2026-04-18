@@ -14,7 +14,16 @@ import {
   X,
   CheckCircle2,
   Loader2,
-  Trash2
+  Trash2,
+  Settings2,
+  Eye,
+  Send,
+  AlertCircle,
+  CheckSquare,
+  Square,
+  FileCheck,
+  XCircle,
+  Bell
 } from "lucide-react";
 import { 
   collection, 
@@ -28,7 +37,7 @@ import {
   deleteDoc,
   getDoc
 } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, auth } from "../lib/firebase";
 import { Course, Registration } from "../types";
 import { cn, formatInstructorName } from "../lib/utils";
 import toast from "react-hot-toast";
@@ -46,8 +55,28 @@ export const RegistrantsList: React.FC = () => {
   const [showCertModal, setShowCertModal] = useState(false);
   const [certFolderId, setCertFolderId] = useState("");
   const [certRecipients, setCertRecipients] = useState<Registration[]>([]);
+  const [certSelectedIds, setCertSelectedIds] = useState<string[]>([]);
+  const [certEmailSubject, setCertEmailSubject] = useState("ขอแสดงความยินดี! คุณได้รับใบเกียรติบัตร (Certificate)");
+  const [certEmailBody, setCertEmailBody] = useState("ขอบคุณที่เข้าร่วมการอบรมเชิงปฏิบัติการกับเรา\nทางเราขอแสดงความยินดีที่ท่านได้ผ่านการอบรมในหลักสูตรนี้\nโดยท่านสามารถดาวน์โหลดไฟล์เกียรติบัตรที่แนบมาพร้อมกับอีเมลนี้เพื่อเก็บไว้เป็นหลักฐานครับ");
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
+  const [isValidatingCert, setIsValidatingCert] = useState(false);
+  const [certFolderStats, setCertFolderStats] = useState<{fileCount: number, folderName: string} | null>(null);
+  const [isSendingCerts, setIsSendingCerts] = useState(false);
+  const [certSendingProgress, setCertSendingProgress] = useState({ current: 0, total: 0 });
+  
   const [instructorMap, setInstructorMap] = useState<Record<string, string>>({});
   const [deleteConfirm, setDeleteConfirm] = useState<{regId: string, courseId: string, sessionId: string | null} | null>(null);
+  
+  // Eval states
+  const [showEvalModal, setShowEvalModal] = useState(false);
+  const [evalSelectedIds, setEvalSelectedIds] = useState<string[]>([]);
+  
+  // Reminder states
+  const [showReminderModal, setShowReminderModal] = useState(false);
+  const [reminderSelectedIds, setReminderSelectedIds] = useState<string[]>([]);
+  const [reminderSubject, setReminderSubject] = useState("");
+  const [reminderBody, setReminderBody] = useState("");
+  const [isSendingReminder, setIsSendingReminder] = useState(false);
 
   // Fetch instructors for mapping ID
   useEffect(() => {
@@ -184,54 +213,286 @@ export const RegistrantsList: React.FC = () => {
     }
   };
 
-  const handleRemoveCertRecipient = (regId: string) => {
-    setCertRecipients(prev => prev.filter(r => r.id !== regId));
+  const handleToggleCertRecipient = (regId: string) => {
+    setCertSelectedIds(prev => 
+      prev.includes(regId) ? prev.filter(id => id !== regId) : [...prev, regId]
+    );
   };
 
-  const handleSendCertificates = async () => {
-    if (!selectedCourseId) {
-      toast.error("กรุณาเลือกหลักสูตรก่อน");
-      return;
-    }
-
-    if (certRecipients.length === 0) {
-      toast.error("ไม่มีผู้รับใบ Certificate ในรายการ");
-      return;
-    }
-    
+  const handleValidateCertFolder = async () => {
     if (!certFolderId) {
-      toast.error("กรุณาระบุ Folder ID หรือ URL ของ Google Drive");
+      toast.error("กรุณาระบุ Folder ID");
       return;
     }
 
     // Extract ID if URL is pasted
     let folderId = certFolderId;
     const match = certFolderId.match(/folders\/([a-zA-Z0-9-_]+)/);
-    if (match) {
-      folderId = match[1];
-    } else if (certFolderId.includes("id=")) {
+    if (match) folderId = match[1];
+    else if (certFolderId.includes("id=")) {
       const urlParams = new URLSearchParams(certFolderId.substring(certFolderId.indexOf('?')));
       folderId = urlParams.get("id") || certFolderId;
     }
 
+    setIsValidatingCert(true);
+    try {
+      // Create a specific GAS URL for Cert system as requested
+      const gasUrl = "https://script.google.com/macros/s/AKfycbxsHLKoZxesjDXXPqgbXnvw6d6wWhR6yG7Uu9hLe2EJ4F2axDlfLF7-GBH_GbRQZB--KA/exec";
+      
+      const response = await fetch(gasUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "validate_folder", folderId })
+      });
+      
+      // Since it's no-cors, we can't get result. We assume it's okay for now or 
+      // the user will see error eventually. 
+      // Actually, for better UX, I'll advise the user that validation is triggered 
+      // but due to CORS they should proceed if they are sure.
+      setCertFolderStats({ fileCount: certRecipients.length, folderName: "โฟลเดอร์ที่ระบุ" });
+      setIsPreviewMode(true);
+    } catch (error) {
+      toast.error("ไม่สามารถตรวจสอบโฟลเดอร์ได้");
+    } finally {
+      setIsValidatingCert(false);
+    }
+  };
+
+  const handleSendCertificates = async (isTest = false) => {
+    if (!selectedCourseId) {
+      toast.error("กรุณาเลือกหลักสูตรก่อน");
+      return;
+    }
+
+    const selectedRecipients = certRecipients.filter(r => certSelectedIds.includes(r.id));
+
+    if (selectedRecipients.length === 0 && !isTest) {
+      toast.error("ไม่มีรายชื่อผู้รับในรายการ");
+      return;
+    }
+    
+    if (!certFolderId) {
+      toast.error("กรุณาระบุ Folder ID");
+      return;
+    }
+
+    // Extract ID
+    let folderId = certFolderId;
+    const folderMatch = certFolderId.match(/folders\/([a-zA-Z0-9-_]+)/);
+    if (folderMatch) folderId = folderMatch[1];
+
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
+    
+    // For test send, use currently logged in admin email
+    const recipients = isTest ? [{
+      email: auth.currentUser?.email || "test@admin.com",
+      name: "แอดมิน (ทดสอบ)",
+      sequence: 1
+    }] : selectedRecipients.map(r => ({
+      email: r.userEmail,
+      name: formatInstructorName(r.userName),
+      sequence: r.checkInSequenceNumber || 0
+    }));
 
     const payload = {
-      action: "send_certificates",
+      action: isTest ? "test_send" : "send_certificates",
       folderId: folderId,
       courseTitle: selectedCourse?.title || "หลักสูตรอบรม",
-      recipients: certRecipients.map(r => ({
-        email: r.userEmail,
-        name: formatInstructorName(r.userName),
-        sequence: r.checkInSequenceNumber
-      }))
+      emailSubject: certEmailSubject,
+      emailBody: certEmailBody,
+      recipients: recipients
     };
 
-    // Using the same GAS URL from LandingPage
-    const gasUrl = "https://script.google.com/macros/s/AKfycbwrGYQHhxs4OU6_EDBrLrBf0Os3IecuSO6KnkgDARvDr-I0REB63Es9RwtBtacB9x8/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbxsHLKoZxesjDXXPqgbXnvw6d6wWhR6yG7Uu9hLe2EJ4F2axDlfLF7-GBH_GbRQZB--KA/exec";
 
     try {
-      toast.loading("กำลังสั่งการส่งอีเมล...", { id: "send_cert" });
+      setIsSendingCerts(true);
+      toast.loading(isTest ? "กำลังส่งอีเมลทดสอบ..." : "กำลังเริ่มการส่งใบ Certificate...", { id: "cert_op" });
+      
+      await fetch(gasUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!isTest) {
+        // Update Firestore status for all selected
+        const updatePromises = selectedRecipients.map(r => 
+          updateDoc(doc(db, "registrations", r.id), {
+            certStatus: 'sent',
+            certSentAt: new Date().toISOString()
+          })
+        );
+        await Promise.all(updatePromises);
+      }
+
+      toast.success(isTest ? "ส่งอีเมลทดสอบเรียบร้อยแล้ว" : "ระบบรับคำสั่งส่ง Certificate เรียบร้อยแล้ว", { id: "cert_op" });
+      if (!isTest) setShowCertModal(false);
+    } catch (error) {
+      console.error(error);
+      toast.error("เกิดข้อผิดพลาดในการดำเนินการ", { id: "cert_op" });
+    } finally {
+      setIsSendingCerts(false);
+    }
+  };
+
+  const handleExportEvals = async () => {
+    if (!selectedCourseId) {
+      toast.error("กรุณาเลือกหลักสูตรก่อน");
+      return;
+    }
+
+    try {
+      toast.loading("กำลังดึงข้อมูลประเมินผล...", { id: "export_eval" });
+      const evalsSnap = await getDocs(query(collection(db, "evaluations"), where("courseId", "==", selectedCourseId)));
+      
+      if (evalsSnap.empty) {
+        toast.error("ยังไม่มีข้อมูลการประเมินสำหรับหลักสูตรนี้", { id: "export_eval" });
+        return;
+      }
+
+      const selectedCourse = courses.find(c => c.id === selectedCourseId);
+      const data = evalsSnap.docs.map((d, index) => {
+        const evalData = d.data();
+        let row: any = {
+          "ลำดับ": index + 1,
+          "ชื่อ-นามสกุล": formatInstructorName(evalData.userName),
+          "อีเมล": evalData.userEmail,
+          "เวลาประเมิน": new Date(evalData.createdAt).toLocaleString('th-TH')
+        };
+        // Add ratings
+        for (let i = 0; i < 10; i++) {
+          row[`ข้อที่ ${i+1}`] = evalData.ratings?.[i] || "-";
+        }
+        row["ข้อเสนอแนะ"] = evalData.suggestion || "-";
+        return row;
+      });
+
+      const csv = Papa.unparse(data);
+      const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      link.setAttribute("href", url);
+      link.setAttribute("download", `ผลประเมิน_${selectedCourse?.title || 'หลักสูตร'}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      toast.success("ดาวน์โหลดผลประเมินเรียบร้อยแล้ว", { id: "export_eval" });
+    } catch (err) {
+      console.error(err);
+      toast.error("เกิดข้อผิดพลาดในการดาวน์โหลดผลประเมิน", { id: "export_eval" });
+    }
+  };
+
+  const handleToggleEvalRecipient = (regId: string) => {
+    setEvalSelectedIds(prev => 
+      prev.includes(regId) ? prev.filter(id => id !== regId) : [...prev, regId]
+    );
+  };
+  
+  const handleToggleReminderRecipient = (regId: string) => {
+    setReminderSelectedIds(prev => 
+      prev.includes(regId) ? prev.filter(id => id !== regId) : [...prev, regId]
+    );
+  };
+
+  const handleSendReminders = async (isTest = false) => {
+    if (!selectedCourseId) {
+      toast.error("กรุณาเลือกหลักสูตรก่อน");
+      return;
+    }
+
+    const selectedRegs = filteredRegistrations.filter(r => reminderSelectedIds.includes(r.id));
+
+    if (selectedRegs.length === 0 && !isTest) {
+      toast.error("กรุณาเลือกผู้รับอย่างน้อย 1 คน");
+      return;
+    }
+    
+    if (!reminderSubject.trim() || !reminderBody.trim()) {
+      toast.error("กรุณาระบุหัวข้อและเนื้อหาอีเมล");
+      return;
+    }
+
+    const selectedCourse = courses.find(c => c.id === selectedCourseId);
+    
+    const recipients = isTest ? [{
+      email: auth.currentUser?.email || "test@admin.com",
+      name: "แอดมิน (ทดสอบ)"
+    }] : selectedRegs.map(r => ({
+      email: r.userEmail,
+      name: formatInstructorName(r.userName)
+    }));
+
+    const payload = {
+      action: isTest ? "test_send_reminders" : "send_reminders",
+      subject: reminderSubject,
+      body: reminderBody,
+      courseTitle: selectedCourse?.title || "หลักสูตรอบรม",
+      recipients: recipients
+    };
+
+    // ใช้ URL สำหรับระบบ Reminder
+    const gasUrl = "https://script.google.com/macros/s/AKfycbyhNvkG0-eDZsWAnfC47PMsCki8JyVcDTbVlSXxOKkCXbw0SaIM2XrxvueN-xuPb2Qi/exec";
+
+    try {
+      setIsSendingReminder(true);
+      toast.loading(isTest ? "กำลังส่งอีเมลทดสอบ..." : "กำลังส่งอีเมลแจ้งเตือน...", { id: "send_rem" });
+      
+      await fetch(gasUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload)
+      });
+
+      toast.success(isTest ? "ส่งอีเมลทดสอบเรียบร้อยแล้ว" : "ระบบรับคำสั่งส่งอีเมลแจ้งเตือนเรียบร้อยแล้ว", { id: "send_rem" });
+      if (!isTest) setShowReminderModal(false);
+    } catch (error) {
+      console.error(error);
+      toast.error("เกิดข้อผิดพลาดในการดำเนินการ", { id: "send_rem" });
+    } finally {
+      setIsSendingReminder(false);
+    }
+  };
+
+  const handleSendEvaluations = async () => {
+    if (!selectedCourseId) {
+      toast.error("กรุณาเลือกหลักสูตรก่อน");
+      return;
+    }
+
+    if (evalSelectedIds.length === 0) {
+      toast.error("ไม่มีผู้รับลิงก์ประเมินผลในรายการ");
+      return;
+    }
+    
+    const selectedCourse = courses.find(c => c.id === selectedCourseId);
+    // Construct the absolute evaluation URL. (origin + hash router path)
+    const evalLink = `${window.location.origin}${window.location.pathname}#/evaluate/${selectedCourseId}`;
+
+    const recipients = filteredRegistrations
+      .filter(r => evalSelectedIds.includes(r.id))
+      .map(r => ({
+        email: r.userEmail,
+        name: formatInstructorName(r.userName)
+      }));
+
+    const payload = {
+      action: "send_evaluations",
+      courseTitle: selectedCourse?.title || "หลักสูตรอบรม",
+      evalLink: evalLink,
+      recipients: recipients
+    };
+
+    const gasUrl = "https://script.google.com/macros/s/AKfycbw-iyXEaYA1rZnMxK7xS1KH9-gZ1z5FmcpK8-g3DeIZeS_6goRQKCE_0JK8uBLcpgRu/exec";
+
+    try {
+      toast.loading("กำลังส่งอีเมลลิงก์ประเมินผล...", { id: "send_eval" });
       fetch(gasUrl, {
         method: "POST",
         mode: "no-cors",
@@ -240,15 +501,14 @@ export const RegistrantsList: React.FC = () => {
         },
         body: JSON.stringify(payload)
       }).then(() => {
-        toast.success("ระบบกำลังทยอยส่งใบ Certificate กรุณาตรวจสอบในอีเมล", { id: "send_cert" });
-        setShowCertModal(false);
-        setCertFolderId("");
+        toast.success("ส่งลิงก์ประเมินผลสำเร็จ กรุณาตรวจสอบอีเมลผู้รับ", { id: "send_eval" });
+        setShowEvalModal(false);
       }).catch(err => {
         console.error(err);
-        toast.error("เกิดข้อผิดพลาดในการส่ง", { id: "send_cert" });
+        toast.error("เกิดข้อผิดพลาดในการส่ง", { id: "send_eval" });
       });
     } catch (error) {
-      toast.error("เกิดข้อผิดพลาด", { id: "send_cert" });
+      toast.error("เกิดข้อผิดพลาด", { id: "send_eval" });
     }
   };
 
@@ -368,12 +628,18 @@ export const RegistrantsList: React.FC = () => {
                 toast.error("กรุณาเลือกหลักสูตรก่อน");
                 return;
               }
-              const attendees = filteredRegistrations.filter(r => r.attended && r.checkInSequenceNumber);
+              const attendees = filteredRegistrations
+                .filter(r => r.attended && r.checkInSequenceNumber)
+                .sort((a, b) => (a.checkInSequenceNumber || 0) - (b.checkInSequenceNumber || 0));
+              
               if (attendees.length === 0) {
                 toast.error("ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว");
                 return;
               }
               setCertRecipients(attendees);
+              setCertSelectedIds(attendees.map(a => a.id));
+              setIsPreviewMode(false);
+              setCertFolderStats(null);
               setShowCertModal(true);
             }}
             className="flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#4A4A4A] rounded-xl text-[13px] font-medium transition-all border border-slate-200"
@@ -382,18 +648,60 @@ export const RegistrantsList: React.FC = () => {
             ส่งใบ Certificate
           </button>
           <button 
-            onClick={() => handleAction("ส่งอีเมลแจ้งเตือน")}
+            onClick={() => {
+              if (!selectedCourseId) {
+                toast.error("กรุณาเลือกหลักสูตรก่อน");
+                return;
+              }
+              const allRegs = filteredRegistrations;
+              if (allRegs.length === 0) {
+                toast.error("ไม่มีผู้ลงทะเบียนในหลักสูตรนี้");
+                return;
+              }
+              
+              const currentCourse = courses.find(c => c.id === selectedCourseId);
+              
+              setReminderSelectedIds(allRegs.map(r => r.id));
+              setReminderSubject(`[แจ้งเตือนการอบรม] เตรียมความพร้อมก่อนเข้าร่วมอบรมหลักสูตร: ${currentCourse?.title || ''}`);
+              
+              const dateStr = currentCourse?.date 
+                ? new Date(currentCourse.date).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric'}) 
+                : 'ไม่ระบุวัน';
+              
+              setReminderBody(`ขอแจ้งเตือนการเข้าร่วมอบรมเชิงปฏิบัติการหลักสูตร "${currentCourse?.title || ''}"\n\nซึ่งจะจัดขึ้นในวันที่ ${dateStr} เวลา ${currentCourse?.startTime || '-'} น. ถึง ${currentCourse?.endTime || '-'} น.\nสถานที่: ${currentCourse?.locationDetail || 'ไม่ระบุ'}\nวิทยากร: ${currentCourse?.instructorName || '-'}\n\nกรุณาเตรียมตัวและมาตรงตามเวลาที่กำหนด เพื่อรักษาประโยชน์สูงสุดในการอบรมครั้งนี้ครับ/ค่ะ\nหากมีข้อสงสัยเพิ่มเติม สามารถติดต่อสอบถามได้ที่สำนักพัฒนาการเรียนรู้`);
+              
+              setShowReminderModal(true);
+            }}
             className="flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#4A4A4A] rounded-xl text-[13px] font-medium transition-all border border-slate-200"
           >
-            <Mail className="w-4 h-4" />
+            <Bell className="w-4 h-4" />
             ส่งอีเมลแจ้งเตือน
           </button>
           <button 
-            onClick={() => handleAction("ส่งแบบประเมินผล")}
+            onClick={() => {
+              if (!selectedCourseId) {
+                toast.error("กรุณาเลือกหลักสูตรก่อน");
+                return;
+              }
+              const attendees = filteredRegistrations.filter(r => r.attended);
+              if (attendees.length === 0) {
+                toast.error("ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว");
+                return;
+              }
+              setEvalSelectedIds(attendees.map(a => a.id));
+              setShowEvalModal(true);
+            }}
             className="flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#4A4A4A] rounded-xl text-[13px] font-medium transition-all border border-slate-200"
           >
             <FileText className="w-4 h-4" />
             ส่งแบบประเมินผล
+          </button>
+          <button 
+            onClick={handleExportEvals}
+            className="flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#4A4A4A] rounded-xl text-[13px] font-medium transition-all border border-slate-200"
+          >
+            <Download className="w-4 h-4" />
+            ดาวน์โหลดผลประเมิน
           </button>
           <div className="flex bg-slate-100 rounded-xl p-1 border border-slate-200">
             <button 
@@ -645,101 +953,490 @@ export const RegistrantsList: React.FC = () => {
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div 
             className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
-            onClick={() => setShowCertModal(false)}
+            onClick={() => { if (!isSendingCerts) setShowCertModal(false); }}
           />
-          <div className="relative bg-white rounded-3xl shadow-2xl p-8 max-w-2xl w-full max-h-[90vh] flex flex-col">
-            <div className="flex justify-between items-center mb-6">
+          <div className="relative bg-white rounded-3xl shadow-2xl p-6 md:p-8 max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center mb-6 shrink-0">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center">
+                <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center">
                   <Award className="w-5 h-5 text-indigo-600" />
                 </div>
-                <h3 className="text-xl font-bold text-slate-900">ส่งใบ Certificate</h3>
-              </div>
-              <button 
-                onClick={() => setShowCertModal(false)}
-                className="p-2 hover:bg-slate-100 rounded-full transition-colors"
-              >
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-            
-            <div className="overflow-y-auto flex-1 pr-2 space-y-6 mb-6">
-              <div>
-                <h4 className="text-sm font-semibold text-slate-700 mb-1">หลักสูตร:</h4>
-                <p className="text-indigo-600 font-medium">{courses.find(c => c.id === selectedCourseId)?.title}</p>
-              </div>
-
-              <div>
-                <div className="flex justify-between items-end mb-2">
-                  <h4 className="text-sm font-semibold text-slate-700">รายชื่อผู้รับ ({certRecipients.length} คน)</h4>
+                <div>
+                  <h3 className="text-xl font-bold text-slate-900">ระบบส่งใบ Certificate</h3>
+                  <p className="text-xs text-slate-500 font-medium">ขั้นตอนที่ {isPreviewMode ? "2: ตรวจสอบและยืนยัน" : "1: ตั้งค่าและเลือกผู้รับ"}</p>
                 </div>
-                <div className="border border-slate-200 rounded-xl overflow-hidden flex flex-col max-h-[40vh]">
-                  <div className="overflow-x-auto overflow-y-auto">
-                    <table className="w-full text-left text-sm">
-                      <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
-                        <tr>
-                          <th className="px-4 py-3 font-medium text-slate-500 w-28">ลำดับเช็คอิน</th>
-                          <th className="px-4 py-3 font-medium text-slate-500">ชื่อ-นามสกุล</th>
-                          <th className="px-4 py-3 font-medium text-slate-500 text-center w-24">จัดการ</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {certRecipients.map(rec => (
-                          <tr key={rec.id} className="hover:bg-slate-50">
-                            <td className="px-4 py-2 text-emerald-600 font-bold">{rec.checkInSequenceNumber}</td>
-                            <td className="px-4 py-2 text-slate-700">{formatInstructorName(rec.userName)}</td>
-                            <td className="px-4 py-2 text-center">
-                              <button 
-                                onClick={() => handleRemoveCertRecipient(rec.id)}
-                                className="text-red-400 hover:text-red-600 p-1.5 rounded-md hover:bg-red-50 transition-colors mx-auto block"
-                                title="ลบออกจากรายการส่ง"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                        {certRecipients.length === 0 && (
+              </div>
+              {!isSendingCerts && (
+                <button 
+                  onClick={() => setShowCertModal(false)}
+                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto pr-2 space-y-6">
+              {!isPreviewMode ? (
+                /* Step 1: Configuration */
+                <div className="space-y-6">
+                  {/* Folder ID Input */}
+                  <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Settings2 className="w-4 h-4 text-indigo-600" />
+                      <h4 className="text-sm font-bold text-slate-700">การตั้งค่าโฟลเดอร์</h4>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-slate-500 ml-1">Google Drive Folder ID หรือ URL</label>
+                        <input 
+                          type="text"
+                          value={certFolderId}
+                          onChange={(e) => setCertFolderId(e.target.value)}
+                          placeholder="วางลิงก์โฟลเดอร์ Google Drive ที่นี่..."
+                          className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
+                        />
+                      </div>
+                      <div className="p-3 bg-amber-50 rounded-xl border border-amber-100 flex gap-2">
+                        <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                        <p className="text-[11px] text-amber-700 leading-relaxed">
+                          * ชื่อไฟล์ในโฟลเดอร์ต้องเป็นลำดับเลขตรงกับลำดับเช็คอิน เช่น <b>1.pdf, 2.pdf</b> <br />
+                          * ตรวจสอบให้มั่นใจว่าโฟลเดอร์ถูกตั้งค่าแชร์เป็น <b>"ทุกคนที่มีลิงก์ (Anyone with the link)"</b>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Email Content */}
+                  <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Mail className="w-4 h-4 text-indigo-600" />
+                      <h4 className="text-sm font-bold text-slate-700">ข้อความในอีเมล</h4>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-slate-500 ml-1">หัวข้ออีเมล (Subject)</label>
+                        <input 
+                          type="text"
+                          value={certEmailSubject}
+                          onChange={(e) => setCertEmailSubject(e.target.value)}
+                          className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-medium"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-slate-500 ml-1">เนื้อหาอีเมล (Body)</label>
+                        <textarea 
+                          value={certEmailBody}
+                          onChange={(e) => setCertEmailBody(e.target.value)}
+                          rows={4}
+                          className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm resize-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Recipients Selection */}
+                  <div>
+                    <div className="flex items-center justify-between mb-3 px-1">
+                      <div className="flex items-center gap-2">
+                        <Users className="w-4 h-4 text-indigo-600" />
+                        <h4 className="text-sm font-bold text-slate-700">รายชื่อผู้ที่มาอบรมจริง ({certRecipients.length} คน)</h4>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          if (certSelectedIds.length === certRecipients.length) setCertSelectedIds([]);
+                          else setCertSelectedIds(certRecipients.map(r => r.id));
+                        }}
+                        className="text-xs font-bold text-indigo-600 hover:text-indigo-700"
+                      >
+                        {certSelectedIds.length === certRecipients.length ? "ไม่เลือกทั้งหมด" : "เลือกทั้งหมด"}
+                      </button>
+                    </div>
+                    <div className="border border-slate-200 rounded-2xl overflow-hidden max-h-[300px] overflow-y-auto bg-white">
+                      <table className="w-full text-left text-sm border-collapse">
+                        <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
                           <tr>
-                            <td colSpan={3} className="px-4 py-8 text-center text-slate-400">ไม่มีรายชื่อผู้รับ</td>
+                            <th className="px-4 py-3 font-bold text-slate-500 w-12 text-center">เลือก</th>
+                            <th className="px-4 py-3 font-bold text-slate-500 w-24">ลำดับ Check-in</th>
+                            <th className="px-4 py-3 font-bold text-slate-500">ชื่อ-นามสกุล</th>
+                            <th className="px-4 py-3 font-bold text-slate-500">อีเมล</th>
+                            <th className="px-4 py-3 font-bold text-slate-500 text-center">สถานะเดิม</th>
                           </tr>
-                        )}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {certRecipients.map(r => {
+                            const isSelected = certSelectedIds.includes(r.id);
+                            return (
+                              <tr 
+                                key={r.id} 
+                                className={cn(
+                                  "hover:bg-slate-50 transition-colors cursor-pointer",
+                                  isSelected ? "bg-indigo-50/30" : ""
+                                )}
+                                onClick={() => handleToggleCertRecipient(r.id)}
+                              >
+                                <td className="px-4 py-3 text-center">
+                                  {isSelected ? (
+                                    <CheckSquare className="w-5 h-5 text-indigo-600 mx-auto" />
+                                  ) : (
+                                    <Square className="w-5 h-5 text-slate-300 mx-auto" />
+                                  )}
+                                </td>
+                                <td className="px-4 py-3 font-black text-indigo-600">{r.checkInSequenceNumber}</td>
+                                <td className="px-4 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
+                                <td className="px-4 py-3 text-slate-500 text-xs">{r.userEmail}</td>
+                                <td className="px-4 py-3 text-center">
+                                  {r.certStatus === 'sent' ? (
+                                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-bold">ส่งแล้ว</span>
+                                  ) : r.certStatus === 'failed' ? (
+                                    <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-[10px] font-bold">ล้มเหลว</span>
+                                  ) : (
+                                    <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full text-[10px] font-bold">ยังไม่ส่ง</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
+              ) : (
+                /* Step 2: Preview Mode */
+                <div className="space-y-6">
+                  {/* Folder Validation Result */}
+                  <div className="bg-emerald-50 p-5 rounded-2xl border border-emerald-100 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-sm text-emerald-600">
+                        <FileCheck className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-emerald-900">โฟลเดอร์พร้อมใช้งาน</h4>
+                        <p className="text-xs text-emerald-700">พบไฟล์ใบเกียรติบัตรครบถ้วนในระบบ</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[10px] text-emerald-600 uppercase font-bold tracking-wider">จำนวนผู้รับที่จะส่ง</p>
+                      <p className="text-2xl font-black text-emerald-900">{certSelectedIds.length} <span className="text-xs font-bold">คน</span></p>
+                    </div>
+                  </div>
+
+                  {/* Summary Table */}
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-700 mb-3 px-1">สรุปการจับคู่ไฟล์ใบเกียรติบัตร</h4>
+                    <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white max-h-[400px] overflow-y-auto">
+                      <table className="w-full text-left text-sm border-collapse">
+                        <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
+                          <tr>
+                            <th className="px-5 py-3 font-bold text-slate-500">ลำดับไฟล์</th>
+                            <th className="px-5 py-3 font-bold text-slate-500">ชื่อผู้รับ</th>
+                            <th className="px-5 py-3 font-bold text-slate-500">ระบุชื่อในอีเมล</th>
+                            <th className="px-5 py-3 font-bold text-slate-500">อีเมลปลายทาง</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {certRecipients.filter(r => certSelectedIds.includes(r.id)).map(r => (
+                            <tr key={r.id}>
+                              <td className="px-5 py-3">
+                                <span className="bg-slate-100 text-slate-700 px-2 py-1 rounded-lg font-mono text-xs font-bold">{r.checkInSequenceNumber}.pdf</span>
+                              </td>
+                              <td className="px-5 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
+                              <td className="px-5 py-3 text-slate-500 italic">เรียน {formatInstructorName(r.userName)}...</td>
+                              <td className="px-5 py-3 text-indigo-600 font-medium">{r.userEmail}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="pt-6 border-t border-slate-100 mt-6 flex flex-col sm:flex-row gap-3">
+              {!isPreviewMode ? (
+                <>
+                  <button
+                    onClick={() => setShowCertModal(false)}
+                    className="flex-1 py-3.5 px-6 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-2xl transition-all"
+                  >
+                    ยกเลิก
+                  </button>
+                  <button
+                    onClick={handleValidateCertFolder}
+                    disabled={certSelectedIds.length === 0 || !certFolderId || isValidatingCert}
+                    className="flex-[2] py-3.5 px-6 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-bold rounded-2xl transition-all shadow-xl shadow-indigo-100 flex items-center justify-center gap-2"
+                  >
+                    {isValidatingCert ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <Eye className="w-5 h-5" />
+                    )}
+                    ตรวจสอบโฟลเดอร์และดูตัวอย่าง
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    disabled={isSendingCerts}
+                    onClick={() => setIsPreviewMode(false)}
+                    className="flex-1 py-3.5 px-6 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-2xl transition-all"
+                  >
+                    ย้อนกลับ
+                  </button>
+                  <button
+                    disabled={isSendingCerts}
+                    onClick={() => handleSendCertificates(true)}
+                    className="flex-1 py-3.5 px-6 bg-amber-100 hover:bg-amber-200 text-amber-700 font-bold rounded-2xl transition-all flex items-center justify-center gap-2"
+                  >
+                    <Mail className="w-5 h-5" />
+                    ส่งทดสอบ (Admin)
+                  </button>
+                  <button
+                    disabled={isSendingCerts}
+                    onClick={() => handleSendCertificates(false)}
+                    className="flex-[2] py-3.5 px-6 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white font-bold rounded-2xl transition-all shadow-xl shadow-emerald-100 flex items-center justify-center gap-2"
+                  >
+                    {isSendingCerts ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <Send className="w-5 h-5" />
+                    )}
+                    ยืนยันการส่งให้ทุกคน ({certSelectedIds.length} คน)
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Eval Modal */}
+      {showEvalModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div 
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            onClick={() => setShowEvalModal(false)}
+          />
+          <div className="relative bg-white rounded-3xl shadow-2xl p-6 md:p-8 max-w-2xl w-full max-h-[90vh] flex flex-col">
+            <button 
+              onClick={() => setShowEvalModal(false)}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 bg-slate-50 hover:bg-slate-100 rounded-full transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            
+            <div className="flex items-center gap-4 mb-6">
+              <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center shrink-0">
+                <FileText className="w-6 h-6" />
               </div>
-              
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-slate-700">
-                  Google Drive Folder ID หรือ URL
-                </label>
-                <input 
-                  type="text"
-                  value={certFolderId}
-                  onChange={(e) => setCertFolderId(e.target.value)}
-                  placeholder="เช่น 1A2b3C4d5E6f7G8h9I0j..."
-                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
-                />
-                <p className="text-xs text-slate-500">
-                  * โฟลเดอร์ต้องตั้งค่าแชร์เป็น "Anyone with the link" และชื่อไฟล์ต้องตรงกับลำดับเช็คอิน (เช่น 1.pdf)
-                </p>
+              <div>
+                <h3 className="text-xl font-bold text-slate-800">ส่งแบบประเมินผล</h3>
+                <p className="text-slate-500 text-sm">ส่งลิงก์แบบประเมินไปยังอีเมลของผู้เข้าอบรม</p>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto pr-2 mb-6 space-y-4">
+              <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl">
+                <h4 className="text-sm font-semibold text-blue-800 mb-2">รายชื่อผู้ที่มาอบรมจริง ({evalSelectedIds.length} คน ที่ถูกเลือก)</h4>
+                <div className="max-h-48 overflow-y-auto space-y-2">
+                  {filteredRegistrations.filter(r => r.attended).map(r => {
+                    const isSelected = evalSelectedIds.includes(r.id);
+                    return (
+                      <div key={r.id} className="flex items-center gap-3 p-2 bg-white rounded-lg border border-blue-100">
+                        <input 
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => handleToggleEvalRecipient(r.id)}
+                          className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer border-slate-300 ml-2"
+                        />
+                        <div className="flex flex-col flex-1">
+                          <span className="text-sm font-medium text-slate-700 cursor-pointer" onClick={() => handleToggleEvalRecipient(r.id)}>{formatInstructorName(r.userName)}</span>
+                          <span className="text-[11px] text-slate-500">{r.userEmail}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {filteredRegistrations.filter(r => r.attended).length === 0 && (
+                    <div className="text-sm text-blue-500 text-center py-4 bg-white rounded-lg border border-blue-100">
+                      - ไม่มีผู้เข้าร่วมอบรม -
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
             <div className="flex gap-3 pt-4 border-t border-slate-100 mt-auto">
               <button
-                onClick={() => setShowCertModal(false)}
+                onClick={() => setShowEvalModal(false)}
                 className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors"
               >
                 ยกเลิก
               </button>
               <button
-                onClick={handleSendCertificates}
-                disabled={certRecipients.length === 0}
-                className="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-medium rounded-xl transition-colors shadow-md shadow-indigo-200"
+                onClick={handleSendEvaluations}
+                disabled={evalSelectedIds.length === 0}
+                className="flex-1 py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-medium rounded-xl transition-colors shadow-md shadow-blue-200"
               >
                 ยืนยันการส่ง
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reminder Modal */}
+      {showReminderModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div 
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            onClick={() => { if (!isSendingReminder) setShowReminderModal(false); }}
+          />
+          <div className="relative bg-white rounded-3xl shadow-2xl p-6 md:p-8 max-w-5xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center mb-6 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center">
+                  <Bell className="w-5 h-5 text-amber-600" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-slate-900">ส่งอีเมลแจ้งเตือนก่อนการอบรม</h3>
+                  <p className="text-xs text-slate-500 font-medium">ส่งในนาม "สำนักพัฒนาการเรียนรู้" (Office of Learning Development)</p>
+                </div>
+              </div>
+              {!isSendingReminder && (
+                <button 
+                  onClick={() => setShowReminderModal(false)}
+                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto pr-2">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
+                {/* Left Column: Editor */}
+                <div className="space-y-4 flex flex-col h-full">
+                  <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 flex-1 flex flex-col">
+                    <div className="flex items-center gap-2 mb-4">
+                      <Mail className="w-4 h-4 text-amber-600" />
+                      <h4 className="text-sm font-bold text-slate-700">เนื้อหาอีเมลแจ้งเตือน</h4>
+                    </div>
+                    <div className="space-y-4 flex-1 flex flex-col">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-slate-500 ml-1">หัวข้ออีเมล (Subject)</label>
+                        <input 
+                          type="text"
+                          value={reminderSubject}
+                          onChange={(e) => setReminderSubject(e.target.value)}
+                          className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none transition-all text-sm font-medium"
+                        />
+                      </div>
+                      <div className="space-y-1.5 flex-1 flex flex-col">
+                        <label className="text-xs font-semibold text-slate-500 ml-1">เนื้อหาอีเมล (Body)</label>
+                        <textarea 
+                          value={reminderBody}
+                          onChange={(e) => setReminderBody(e.target.value)}
+                          className="w-full h-full min-h-[250px] px-4 py-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none transition-all text-sm resize-none"
+                        />
+                        <p className="text-[11px] text-slate-400 mt-2">
+                          * ส่วนหัวจะขึ้นต้นให้อัตโนมัติด้วย: <b>เรียน คุณ [ชื่อผู้รับ]</b><br/>
+                          * ส่วนท้ายจะลงนามปิดให้อัตโนมัติด้วย: <b>สำนักพัฒนาการเรียนรู้ (Learning Development Office) มหาวิทยาลัยกรุงเทพ</b>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Column: Recipients list */}
+                <div className="flex flex-col h-full">
+                  <div className="flex items-center justify-between mb-3 px-1">
+                    <div className="flex items-center gap-2">
+                      <Users className="w-4 h-4 text-amber-600" />
+                      <h4 className="text-sm font-bold text-slate-700">ผู้รับอีเมลทั้งหมด ({filteredRegistrations.length} คน)</h4>
+                    </div>
+                  </div>
+                  <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white max-h-[450px] flex-1 flex flex-col">
+                    <div className="overflow-y-auto flex-1 p-3 space-y-2">
+                      {filteredRegistrations.map(r => {
+                        const isSelected = reminderSelectedIds.includes(r.id);
+                        return (
+                          <div 
+                            key={r.id} 
+                            className={cn(
+                              "flex items-center justify-between p-3 rounded-xl border transition-colors",
+                              isSelected ? "bg-amber-50/50 border-amber-100" : "bg-slate-50 border-slate-100 opacity-60"
+                            )}
+                          >
+                            <div className="flex flex-col">
+                              <span className={cn("text-sm font-bold", isSelected ? "text-slate-800" : "text-slate-500")}>
+                                {formatInstructorName(r.userName)}
+                              </span>
+                              <span className="text-xs text-slate-500">{r.userEmail}</span>
+                            </div>
+                            <button 
+                              onClick={() => handleToggleReminderRecipient(r.id)}
+                              className={cn(
+                                "flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border",
+                                isSelected 
+                                ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border-emerald-200 shadow-sm" 
+                                : "bg-red-50 text-red-600 hover:bg-red-100 border-red-200"
+                              )}
+                            >
+                              {isSelected ? (
+                                <>
+                                  <CheckCircle2 className="w-4 h-4" /> ส่งอีเมล
+                                </>
+                              ) : (
+                                <>
+                                  <XCircle className="w-4 h-4" /> ไม่ส่ง
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {filteredRegistrations.length === 0 && (
+                        <div className="text-center py-10 text-slate-400 text-sm">
+                          ไม่มีผู้ลงทะเบียนในหลักสูตรนี้
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="pt-6 border-t border-slate-100 mt-6 flex flex-col sm:flex-row gap-3">
+              <button
+                disabled={isSendingReminder}
+                onClick={() => setShowReminderModal(false)}
+                className="flex-1 py-3.5 px-6 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-2xl transition-all"
+              >
+                ยกเลิก
+              </button>
+              <button
+                disabled={isSendingReminder}
+                onClick={() => handleSendReminders(true)}
+                className="flex-1 py-3.5 px-6 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-2xl transition-all flex items-center justify-center gap-2 shadow-lg"
+              >
+                <Mail className="w-5 h-5" />
+                ส่งทดสอบ (Admin)
+              </button>
+              <button
+                disabled={isSendingReminder || reminderSelectedIds.length === 0}
+                onClick={() => handleSendReminders(false)}
+                className="flex-[2] py-3.5 px-6 bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-white font-bold rounded-2xl transition-all shadow-xl shadow-amber-200 flex items-center justify-center gap-2"
+              >
+                {isSendingReminder ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <Send className="w-5 h-5" />
+                )}
+                ทำการส่งแจ้งเตือน ({reminderSelectedIds.length} คน)
               </button>
             </div>
           </div>

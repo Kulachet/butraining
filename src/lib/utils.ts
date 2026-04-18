@@ -8,17 +8,48 @@ export function cn(...inputs: ClassValue[]) {
 export function formatInstructorName(name: string | undefined): string {
   if (!name) return "";
   const trimmedName = name.trim();
-  const prefixes = [
-    "ผศ.", "รศ.", "ศ.", "ดร.", "ผศ.ดร.", "รศ.ดร.", "ศ.ดร.", 
-    "อ.", "อาจารย์", "ผศ", "รศ", "ศ", "ดร"
+  
+  // Safe prefixes to check directly (with dots or full words)
+  const standardPrefixes = [
+    "ผศ.ดร.", "รศ.ดร.", "ศ.ดร.", 
+    "ผศ.", "รศ.", "ศ.", "ดร.", "อ.", "อาจารย์"
   ];
   
-  const hasPrefix = prefixes.some(prefix => trimmedName.startsWith(prefix));
-  
-  if (!hasPrefix) {
-    return `อ. ${trimmedName}`;
+  // Prefixes that are often typed without dots, but we MUST check if they are followed by a space
+  // to avoid false positives (e.g., "ศ" in "ศิริพงศ์", "ดร" in "ดรุณี", "อ" in "อนุชา")
+  const spaceRequiredPrefixes = [
+    "ผศ", "รศ", "ศ", "ดร", "อ"
+  ];
+
+  let cleanedName = trimmedName;
+  let hasPrefix = false;
+
+  for (const prefix of standardPrefixes) {
+    if (cleanedName.startsWith(prefix)) {
+      hasPrefix = true;
+      // Remove space after prefix if it exists
+      if (cleanedName.startsWith(prefix + " ")) {
+        cleanedName = prefix + cleanedName.substring(prefix.length).trim();
+      }
+      break;
+    }
   }
-  return trimmedName;
+
+  if (!hasPrefix) {
+    for (const prefix of spaceRequiredPrefixes) {
+      if (cleanedName.startsWith(prefix + " ")) {
+        hasPrefix = true;
+        // Normalize to dotted prefix and remove space
+        cleanedName = prefix + "." + cleanedName.substring(prefix.length).trim();
+        break;
+      }
+    }
+  }
+
+  if (!hasPrefix) {
+    return `อ.${cleanedName}`;
+  }
+  return cleanedName;
 }
 
 export function formatDateThai(dateString: string | undefined): string {

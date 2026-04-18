@@ -18,10 +18,14 @@ export const InstructorList: React.FC = () => {
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({
-        ...doc.data(),
-        id: doc.id
-      })) as Instructor[];
+      const data = snapshot.docs.map(doc => {
+        const docData = doc.data();
+        return {
+          ...docData,
+          firebaseId: doc.id,
+          id: docData.id || doc.id // Prefer the recorded ID from data, fallback to document ID
+        };
+      }) as Instructor[];
       setInstructors(data);
       setLoading(false);
       setError(null);

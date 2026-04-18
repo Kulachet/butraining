@@ -94,6 +94,10 @@ export const LandingPage: React.FC = () => {
     }
   }, [user, instructor, loading]);
 
+  const handleEvaluate = (courseId: string) => {
+    navigate(`/evaluate/${courseId}`);
+  };
+
   const handleRegisterClick = (courseId: string) => {
     if (!user) {
       login();
@@ -127,7 +131,7 @@ export const LandingPage: React.FC = () => {
       toast.success("ลงทะเบียนสำเร็จ! ระบบกำลังส่งคำเชิญลงปฏิทินของคุณ...");
       
       // Auto-send Calendar Invite via GAS
-      const gasUrl = "https://script.google.com/macros/s/AKfycbwrGYQHhxs4OU6_EDBrLrBf0Os3IecuSO6KnkgDARvDr-I0REB63Es9RwtBtacB9x8/exec";
+      const gasUrl = "https://script.google.com/macros/s/AKfycbzyybxBFSuJnwAR7YxDWynU7q_40qEKVwNCw3ZfXn519WSCTaHddNNGorz88vPIuuQA/exec";
       const payload = {
         courseTitle: course.title,
         description: course.description || "",
@@ -310,6 +314,7 @@ export const LandingPage: React.FC = () => {
                       course={course} 
                       onRegister={handleRegisterClick} 
                       onCancel={setCourseToCancel}
+                      onEvaluate={handleEvaluate}
                       isLoading={registering === course.id}
                       isRegistered={userRegistrations.includes(course.id)}
                     />

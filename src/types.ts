@@ -64,6 +64,8 @@ export interface Registration {
   checkInAt?: string;
   attended: boolean;
   registeredAt: string;
+  certStatus?: 'pending' | 'sent' | 'failed';
+  certSentAt?: string;
 }
 
 export interface EvaluationSummary {

@@ -11,6 +11,7 @@ import { AdminPortal } from "./pages/AdminPortal";
 import { CourseEditorPage } from "./pages/CourseEditorPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { CheckinPage } from "./pages/CheckinPage";
+import { EvaluatePage } from "./pages/EvaluatePage";
 import { Toaster } from "react-hot-toast";
 
 const AppContent = () => {
@@ -38,6 +39,7 @@ const AppContent = () => {
           <Route path="/admin/course/edit/:id" element={<CourseEditorPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/checkin/:courseId" element={<CheckinPage />} />
+          <Route path="/evaluate/:courseId" element={<EvaluatePage />} />
           {/* Add more routes as needed */}
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>

@@ -8,11 +8,12 @@ interface Props {
   course: Course;
   onRegister: (courseId: string) => void;
   onCancel?: (courseId: string) => void;
+  onEvaluate?: (courseId: string) => void;
   isLoading?: boolean;
   isRegistered?: boolean;
 }
 
-export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, isLoading, isRegistered }) => {
+export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEvaluate, isLoading, isRegistered }) => {
   const [showImageModal, setShowImageModal] = useState(false);
 
   const isCompleted = course.sessions?.every(session => {
@@ -129,30 +130,40 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, isLo
           </div>
           
           <div className="mt-auto flex justify-end">
-            <button
-              onClick={() => isRegistered ? onCancel?.(course.id) : onRegister(course.id)}
-              disabled={isLoading || isCompleted || (!isRegistered && isFull)}
-              className={cn(
-                "w-full md:w-auto px-8 font-medium py-2.5 text-sm rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 tracking-wide",
-                isCompleted 
-                  ? "bg-slate-100 text-slate-400 cursor-not-allowed" 
-                  : isRegistered
-                    ? "bg-white text-red-500 border border-red-200 hover:bg-red-50 shadow-sm"
-                    : isFull
-                      ? "bg-orange-100 text-orange-600 border border-orange-200 cursor-not-allowed"
-                      : "bg-crimson hover:bg-crimson-dark text-white shadow-md shadow-crimson/10"
-              )}
-            >
-              {isLoading ? (
-                <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <>
-                  {isCompleted ? "ปิดรับสมัครแล้ว" : isRegistered ? "ยกเลิกการลงทะเบียน" : isFull ? "ที่นั่งเต็ม" : "ลงทะเบียนเข้าร่วม"}
-                  {!isCompleted && !isRegistered && !isFull && <ArrowRight className="w-4 h-4" strokeWidth={1.5} />}
-                  {isRegistered && <X className="w-4 h-4" strokeWidth={1.5} />}
-                </>
-              )}
-            </button>
+            {(isCompleted && isRegistered) ? (
+              <button
+                onClick={() => onEvaluate?.(course.id)}
+                className="w-full md:w-auto px-8 font-medium py-2.5 text-sm rounded-lg transition-all flex items-center justify-center gap-2 tracking-wide bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/20"
+              >
+                ทำแบบประเมินผล
+                <ArrowRight className="w-4 h-4" strokeWidth={1.5} />
+              </button>
+            ) : (
+              <button
+                onClick={() => isRegistered ? onCancel?.(course.id) : onRegister(course.id)}
+                disabled={isLoading || isCompleted || (!isRegistered && isFull)}
+                className={cn(
+                  "w-full md:w-auto px-8 font-medium py-2.5 text-sm rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 tracking-wide",
+                  isCompleted 
+                    ? "bg-slate-100 text-slate-400 cursor-not-allowed" 
+                    : isRegistered
+                      ? "bg-white text-red-500 border border-red-200 hover:bg-red-50 shadow-sm"
+                      : isFull
+                        ? "bg-orange-100 text-orange-600 border border-orange-200 cursor-not-allowed"
+                        : "bg-crimson hover:bg-crimson-dark text-white shadow-md shadow-crimson/10"
+                )}
+              >
+                {isLoading ? (
+                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <>
+                    {isCompleted ? "ปิดรับสมัครแล้ว" : isRegistered ? "ยกเลิกการลงทะเบียน" : isFull ? "ที่นั่งเต็ม" : "ลงทะเบียนเข้าร่วม"}
+                    {!isCompleted && !isRegistered && !isFull && <ArrowRight className="w-4 h-4" strokeWidth={1.5} />}
+                    {isRegistered && !isCompleted && <X className="w-4 h-4" strokeWidth={1.5} />}
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       </motion.div>

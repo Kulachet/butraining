@@ -9,6 +9,7 @@ import { ManageCourses } from "../components/ManageCourses";
 import { CSVUploader } from "../components/CSVUploader";
 import { InstructorList } from "../components/InstructorList";
 import { RegistrantsList } from "../components/RegistrantsList";
+import { EvaluationDashboard } from "../components/EvaluationDashboard";
 import { 
   Plus, 
   LayoutDashboard, 
@@ -232,18 +233,7 @@ export const AdminPortal: React.FC = () => {
               )}
 
               {activeTab === "evaluations" && (
-                <>
-                  <header className="mb-12">
-                    <h1 className="text-[28px] lg:text-[32px] font-bold text-[#333333] tracking-[0.02em] leading-[1.6]">ผลการประเมิน</h1>
-                    <p className="text-[#4A4A4A] font-normal text-[14px] lg:text-[16px] mt-1 leading-[1.7]">สรุปผลการประเมินความพึงพอใจรายหลักสูตร</p>
-                  </header>
-                  <div className="bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden p-20 text-center">
-                    <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-6">
-                      <BarChart3 className="w-10 h-10 text-slate-200" />
-                    </div>
-                    <p className="text-[#4A4A4A] font-normal text-[14px] lg:text-[16px] leading-[1.7]">ฟีเจอร์ผลการประเมินกำลังอยู่ในการพัฒนา</p>
-                  </div>
-                </>
+                <EvaluationDashboard />
               )}
 
               {activeTab === "settings" && (
