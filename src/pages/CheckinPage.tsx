@@ -47,47 +47,52 @@ export const CheckinPage: React.FC = () => {
         setCourse(courseData);
 
         // 2. Find Registration for this user and course
-        const regRef = doc(db, "registrations", `${courseId}_${user.uid}`);
-        const regSnap = await getDoc(regRef);
+        // Try direct ID first (most efficient)
+        let regRef = doc(db, "registrations", `${courseId}_${user.uid}`);
+        let regSnap = await getDoc(regRef);
+        let regData: Registration | null = null;
 
-        if (!regSnap.exists()) {
+        if (regSnap.exists()) {
+          regData = regSnap.data() as Registration;
+        } else {
+          // Fallback: Query by courseId and userId (in case ID format changed)
+          const qReg = query(
+            collection(db, "registrations"),
+            where("courseId", "==", courseId),
+            where("userId", "==", user.uid)
+          );
+          const qSnap = await getDocs(qReg);
+          if (!qSnap.empty) {
+            regSnap = qSnap.docs[0];
+            regRef = regSnap.ref;
+            regData = regSnap.data() as Registration;
+          }
+        }
+
+        if (!regData) {
           setStatus("error");
           setMessage("คุณยังไม่ได้ลงทะเบียนในหลักสูตรนี้");
           return;
         }
 
-        const regData = regSnap.data() as Registration;
-
         if (regData.attended) {
           setStatus("success");
           setMessage("คุณได้เช็คอินเรียบร้อยแล้วก่อนหน้านี้");
         } else {
-          // 3. Update Attendance
-          // Optimization: Only count attended registrations or get the specific max number
-          // We'll use a simple count of already attended people as the sequence number for now
-          // to avoid listing ALL registrations which might be large or restricted.
-          const attendedQ = query(
-            collection(db, "registrations"), 
-            where("courseId", "==", courseId),
-            where("attended", "==", true)
-          );
-          const attendedSnap = await getDocs(attendedQ);
-          let currentAttendeesCount = attendedSnap.size;
-
           try {
             await updateDoc(regRef, {
               attended: true,
-              checkInAt: new Date().toISOString(),
-              checkInSequenceNumber: currentAttendeesCount + 1
+              checkInAt: new Date().toISOString()
             });
             setStatus("success");
             setMessage("เช็คอินสำเร็จ! ยินดีต้อนรับเข้าสู่การอบรม");
           } catch (updateError: any) {
-            console.error("Update error:", updateError);
-            if (updateError.message?.includes("permission-denied") || updateError.code === "permission-denied") {
-              throw new Error("ไม่มีสิทธิ์ในการบันทึกข้อมูล (Permission Denied) กรุณาติดต่อผู้ดูแลระบบเพื่อตรวจสอบ Security Rules");
+            console.error("Firestore Update Error:", updateError);
+            const errorMessage = updateError.message || String(updateError);
+            if (errorMessage.includes("permission-denied") || updateError.code === "permission-denied") {
+              throw new Error(`Permission Denied: ไม่สามารถบันทึกข้อมูลได้ (UID: ${user.uid})`);
             }
-            throw updateError;
+            throw new Error(`Update Failed: ${errorMessage}`);
           }
         }
       } catch (error: any) {

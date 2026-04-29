@@ -237,7 +237,7 @@ export const RegistrantsList: React.FC = () => {
     setIsValidatingCert(true);
     try {
       // Create a specific GAS URL for Cert system as requested
-      const gasUrl = "https://script.google.com/macros/s/AKfycbxsHLKoZxesjDXXPqgbXnvw6d6wWhR6yG7Uu9hLe2EJ4F2axDlfLF7-GBH_GbRQZB--KA/exec";
+      const gasUrl = "https://script.google.com/macros/s/AKfycbzSvCdEpfWsC4NL-BKp1SqpbKpsJtENDVcFGoL23DNHlChwW9HPNtnMCkxjQelMN8AT/exec";
       
       const response = await fetch(gasUrl, {
         method: "POST",
@@ -304,7 +304,7 @@ export const RegistrantsList: React.FC = () => {
       recipients: recipients
     };
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbxsHLKoZxesjDXXPqgbXnvw6d6wWhR6yG7Uu9hLe2EJ4F2axDlfLF7-GBH_GbRQZB--KA/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbzSvCdEpfWsC4NL-BKp1SqpbKpsJtENDVcFGoL23DNHlChwW9HPNtnMCkxjQelMN8AT/exec";
 
     try {
       setIsSendingCerts(true);
@@ -437,7 +437,7 @@ export const RegistrantsList: React.FC = () => {
     };
 
     // ใช้ URL สำหรับระบบ Reminder
-    const gasUrl = "https://script.google.com/macros/s/AKfycbyhNvkG0-eDZsWAnfC47PMsCki8JyVcDTbVlSXxOKkCXbw0SaIM2XrxvueN-xuPb2Qi/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbzSvCdEpfWsC4NL-BKp1SqpbKpsJtENDVcFGoL23DNHlChwW9HPNtnMCkxjQelMN8AT/exec";
 
     try {
       setIsSendingReminder(true);
@@ -489,7 +489,7 @@ export const RegistrantsList: React.FC = () => {
       recipients: recipients
     };
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbw-iyXEaYA1rZnMxK7xS1KH9-gZ1z5FmcpK8-g3DeIZeS_6goRQKCE_0JK8uBLcpgRu/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbzSvCdEpfWsC4NL-BKp1SqpbKpsJtENDVcFGoL23DNHlChwW9HPNtnMCkxjQelMN8AT/exec";
 
     try {
       toast.loading("กำลังส่งอีเมลลิงก์ประเมินผล...", { id: "send_eval" });
@@ -925,7 +925,7 @@ export const RegistrantsList: React.FC = () => {
 
             <div className="bg-slate-50 p-8 rounded-[2.5rem] border border-slate-100 mb-8 flex justify-center">
               <QRCodeSVG 
-                value={`${window.location.origin}/#/checkin/${selectedCourseId}`}
+                value={`${window.location.href.split('#')[0].replace(/\/$/, '')}/#/checkin/${selectedCourseId}`}
                 size={200}
                 level="H"
                 includeMargin={true}
