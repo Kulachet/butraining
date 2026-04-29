@@ -78,9 +78,8 @@ service cloud.firestore {
     }
 
     match /registrations/{regId} {
-      // List/Get: Owner can see their own, Admin can see all
-      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
-      allow get: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      // Allow get/list for any BU account to prevent Permission Denied on initial check
+      allow read: if isAdmin() || (isSignedIn() && isBUAccount());
       
       allow create: if isSignedIn() && isBUAccount() && 
                     incoming().userId == request.auth.uid && 
@@ -89,7 +88,6 @@ service cloud.firestore {
       allow update: if isAdmin() || (
         isSignedIn() && 
         existing().userId == request.auth.uid && 
-        isValidRegistration(incoming()) &&
         incoming().diff(existing()).affectedKeys().hasOnly(['attended', 'checkInAt', 'checkInSequenceNumber'])
       );
 

@@ -237,7 +237,7 @@ export const RegistrantsList: React.FC = () => {
     setIsValidatingCert(true);
     try {
       // Create a specific GAS URL for Cert system as requested
-      const gasUrl = "https://script.google.com/macros/s/AKfycbzSvCdEpfWsC4NL-BKp1SqpbKpsJtENDVcFGoL23DNHlChwW9HPNtnMCkxjQelMN8AT/exec";
+      const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
       
       const response = await fetch(gasUrl, {
         method: "POST",
@@ -304,7 +304,7 @@ export const RegistrantsList: React.FC = () => {
       recipients: recipients
     };
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbzSvCdEpfWsC4NL-BKp1SqpbKpsJtENDVcFGoL23DNHlChwW9HPNtnMCkxjQelMN8AT/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
 
     try {
       setIsSendingCerts(true);
@@ -437,7 +437,7 @@ export const RegistrantsList: React.FC = () => {
     };
 
     // ใช้ URL สำหรับระบบ Reminder
-    const gasUrl = "https://script.google.com/macros/s/AKfycbzSvCdEpfWsC4NL-BKp1SqpbKpsJtENDVcFGoL23DNHlChwW9HPNtnMCkxjQelMN8AT/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
 
     try {
       setIsSendingReminder(true);
@@ -489,7 +489,7 @@ export const RegistrantsList: React.FC = () => {
       recipients: recipients
     };
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbzSvCdEpfWsC4NL-BKp1SqpbKpsJtENDVcFGoL23DNHlChwW9HPNtnMCkxjQelMN8AT/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
 
     try {
       toast.loading("กำลังส่งอีเมลลิงก์ประเมินผล...", { id: "send_eval" });

@@ -25,7 +25,7 @@ export const InstructorList: React.FC = () => {
           firebaseId: doc.id,
           id: docData.id || doc.id // Prefer the recorded ID from data, fallback to document ID
         };
-      }) as Instructor[];
+      }) as unknown as Instructor[];
       setInstructors(data);
       setLoading(false);
       setError(null);
