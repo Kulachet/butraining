@@ -97,7 +97,11 @@ service cloud.firestore {
     match /registrations/{regId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidRegistration(request.resource.data);
-      allow update: if isAdmin();
+      allow update: if isAdmin() || (
+        isAuthenticated() && 
+        resource.data.userId == request.auth.uid && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attended', 'checkInAt', 'checkInSequenceNumber'])
+      );
       allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
     }
 

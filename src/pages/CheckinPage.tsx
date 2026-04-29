@@ -63,29 +63,46 @@ export const CheckinPage: React.FC = () => {
           setMessage("คุณได้เช็คอินเรียบร้อยแล้วก่อนหน้านี้");
         } else {
           // 3. Update Attendance
-          // Find max checkInSequenceNumber for this course
-          const allRegsQ = query(collection(db, "registrations"), where("courseId", "==", courseId));
-          const allRegsSnap = await getDocs(allRegsQ);
-          let maxCheckInSeq = 0;
-          allRegsSnap.forEach(doc => {
-            const data = doc.data() as Registration;
-            if (data.checkInSequenceNumber && data.checkInSequenceNumber > maxCheckInSeq) {
-              maxCheckInSeq = data.checkInSequenceNumber;
-            }
-          });
+          // Optimization: Only count attended registrations or get the specific max number
+          // We'll use a simple count of already attended people as the sequence number for now
+          // to avoid listing ALL registrations which might be large or restricted.
+          const attendedQ = query(
+            collection(db, "registrations"), 
+            where("courseId", "==", courseId),
+            where("attended", "==", true)
+          );
+          const attendedSnap = await getDocs(attendedQ);
+          let currentAttendeesCount = attendedSnap.size;
 
-          await updateDoc(regRef, {
-            attended: true,
-            checkInAt: new Date().toISOString(),
-            checkInSequenceNumber: maxCheckInSeq + 1
-          });
-          setStatus("success");
-          setMessage("เช็คอินสำเร็จ! ยินดีต้อนรับเข้าสู่การอบรม");
+          try {
+            await updateDoc(regRef, {
+              attended: true,
+              checkInAt: new Date().toISOString(),
+              checkInSequenceNumber: currentAttendeesCount + 1
+            });
+            setStatus("success");
+            setMessage("เช็คอินสำเร็จ! ยินดีต้อนรับเข้าสู่การอบรม");
+          } catch (updateError: any) {
+            console.error("Update error:", updateError);
+            if (updateError.message?.includes("permission-denied") || updateError.code === "permission-denied") {
+              throw new Error("ไม่มีสิทธิ์ในการบันทึกข้อมูล (Permission Denied) กรุณาติดต่อผู้ดูแลระบบเพื่อตรวจสอบ Security Rules");
+            }
+            throw updateError;
+          }
         }
-      } catch (error) {
-        console.error("Checkin error:", error);
+      } catch (error: any) {
+        console.error("Checkin error detail:", error);
         setStatus("error");
-        setMessage("เกิดข้อผิดพลาดในการเช็คอิน กรุณาลองใหม่อีกครั้ง");
+        
+        let errorMsg = "เกิดข้อผิดพลาดในการเช็คอิน กรุณาลองใหม่อีกครั้ง";
+        if (error instanceof Error) {
+          if (error.message.includes("Permission Denied") || error.message.includes("permission-denied")) {
+            errorMsg = "ไม่สามารถบันทึกข้อมูลได้เนื่องจากข้อจำกัดด้านสิทธิ์เข้าถึง (Security Rules)";
+          } else if (error.message.includes("not found")) {
+            errorMsg = error.message;
+          }
+        }
+        setMessage(errorMsg);
       } finally {
         setChecking(false);
       }
@@ -156,22 +173,30 @@ export const CheckinPage: React.FC = () => {
             <div className="space-y-2">
               <h2 className="text-xl font-black text-slate-800">{message}</h2>
               <p className="text-slate-500 text-sm font-medium">
-                {user ? "กรุณาตรวจสอบว่าคุณได้ลงทะเบียนหลักสูตรนี้แล้ว" : "กรุณาเข้าสู่ระบบด้วย @bu.ac.th เพื่อดำเนินการต่อ"}
+                {user ? "หากคุณแน่ใจว่าลงทะเบียนแล้ว กรุณาลองใหม่อีกครั้ง หรือติดต่อผู้ดูแลระบบ" : "กรุณาเข้าสู่ระบบด้วย @bu.ac.th เพื่อดำเนินการต่อ"}
               </p>
             </div>
-            {!user ? (
+            {user ? (
+              <div className="flex flex-col gap-3">
+                <button 
+                  onClick={() => window.location.reload()}
+                  className="w-full py-4 bg-crimson text-white font-bold rounded-2xl hover:bg-crimson-dark transition-all shadow-xl"
+                >
+                  ลองสแกนใหม่อีกครั้ง
+                </button>
+                <button 
+                  onClick={() => navigate("/")}
+                  className="w-full py-4 bg-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-200 transition-all"
+                >
+                  กลับไปหน้าหลัก
+                </button>
+              </div>
+            ) : (
               <button 
                 onClick={login}
                 className="w-full py-4 bg-crimson text-white font-bold rounded-2xl hover:bg-crimson-dark transition-all shadow-xl"
               >
                 เข้าสู่ระบบเพื่อเช็คอิน
-              </button>
-            ) : (
-              <button 
-                onClick={() => navigate("/")}
-                className="w-full py-4 bg-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-200 transition-all"
-              >
-                กลับไปหน้าหลัก
               </button>
             )}
           </div>
