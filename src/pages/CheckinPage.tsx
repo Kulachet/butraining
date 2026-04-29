@@ -80,6 +80,7 @@ export const CheckinPage: React.FC = () => {
           setMessage("คุณได้เช็คอินเรียบร้อยแล้วก่อนหน้านี้");
         } else {
           try {
+            // ส่งเฉพาะฟิลด์ที่จำเป็นและตรงกับ Security Rules
             await updateDoc(regRef, {
               attended: true,
               checkInAt: new Date().toISOString()
@@ -90,9 +91,9 @@ export const CheckinPage: React.FC = () => {
             console.error("Firestore Update Error:", updateError);
             const errorMessage = updateError.message || String(updateError);
             if (errorMessage.includes("permission-denied") || updateError.code === "permission-denied") {
-              throw new Error(`Permission Denied: ไม่สามารถบันทึกข้อมูลได้ (UID: ${user.uid})`);
+              throw new Error(`สิทธิ์ไม่เพียงพอ: ไม่สามารถบันทึกสถานะได้ (UID: ${user.uid}). กรุณาตรวจสอบ Security Rules ใน Firebase Console`);
             }
-            throw new Error(`Update Failed: ${errorMessage}`);
+            throw new Error(`เช็คอินไม่สำเร็จ: ${errorMessage}`);
           }
         }
       } catch (error: any) {
