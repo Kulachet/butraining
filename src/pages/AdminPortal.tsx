@@ -10,6 +10,7 @@ import { CSVUploader } from "../components/CSVUploader";
 import { InstructorList } from "../components/InstructorList";
 import { RegistrantsList } from "../components/RegistrantsList";
 import { EvaluationDashboard } from "../components/EvaluationDashboard";
+import { EvaluationSettings } from "../components/EvaluationSettings";
 import { 
   Plus, 
   LayoutDashboard, 
@@ -134,6 +135,13 @@ export const AdminPortal: React.FC = () => {
               <BarChart3 className="w-5 h-5" />
               ผลการประเมิน
             </button>
+            <button 
+              onClick={() => { setActiveTab("settings"); setViewingApplicants(null); }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "settings" ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+            >
+              <Settings className="w-5 h-5" />
+              ตั้งค่าระบบ
+            </button>
           </nav>
 
           <div className="p-4 border-t border-slate-100">
@@ -237,15 +245,13 @@ export const AdminPortal: React.FC = () => {
               )}
 
               {activeTab === "settings" && (
-                <>
+                <div className="space-y-8">
                   <header className="mb-12">
                     <h1 className="text-[28px] lg:text-[32px] font-bold text-[#333333] tracking-[0.02em] leading-[1.6]">ตั้งค่าระบบ</h1>
-                    <p className="text-[#4A4A4A] font-normal text-[14px] lg:text-[16px] mt-1 leading-[1.7]">ปรับแต่งการทำงานของพอร์ทัล</p>
+                    <p className="text-[#4A4A4A] font-normal text-[14px] lg:text-[16px] mt-1 leading-[1.7]">ปรับแต่งการทำงานของพอร์ทัลและการประเมินผล</p>
                   </header>
-                  <div className="bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden p-20 text-center">
-                    <p className="text-[#4A4A4A] font-normal text-[14px] lg:text-[16px] leading-[1.7]">ฟีเจอร์ตั้งค่าระบบกำลังอยู่ในการพัฒนา</p>
-                  </div>
-                </>
+                  <EvaluationSettings />
+                </div>
               )}
             </>
           )}

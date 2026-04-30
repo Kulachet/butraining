@@ -63,6 +63,29 @@
           }
         }
       }
+    },
+    "evaluations": {
+      "title": "Evaluation",
+      "description": "User feedback for a course.",
+      "type": "object",
+      "properties": {
+        "courseId": { "type": "string" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "ratings": { "type": "object" },
+        "suggestion": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["courseId", "userId", "ratings"]
+    },
+    "settings": {
+      "title": "Settings",
+      "description": "Global application settings.",
+      "type": "object",
+      "properties": {
+        "evaluationQuestions": { "type": "array", "items": { "type": "string" } }
+      }
     }
   },
   "firestore": {
@@ -81,6 +104,14 @@
     "/mail/{mailId}": {
       "schema": "mail",
       "description": "Email queue."
+    },
+    "/evaluations/{evalId}": {
+      "schema": "evaluations",
+      "description": "User feedback records."
+    },
+    "/settings/{settingId}": {
+      "schema": "settings",
+      "description": "Global configuration documents."
     }
   }
 }

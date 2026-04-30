@@ -67,11 +67,11 @@ service cloud.firestore {
     match /registrations/{regId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidRegistration(request.resource.data);
-      // แก้ไข: อนุญาตให้ User เจ้าของรายการ สามารถอัปเดต 'attended' และ 'checkInAt' เพื่อเช็คอินได้
+      // แก้ไข: อนุญาตให้ User เจ้าของรายการ สามารถอัปเดต 'attended', 'checkInAt' และ 'checkInSequenceNumber' เพื่อเช็คอินได้
       allow update: if isAdmin() || (
         isAuthenticated() && 
         resource.data.userId == request.auth.uid && 
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attended', 'checkInAt'])
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attended', 'checkInAt', 'checkInSequenceNumber'])
       );
       // แก้ไข: อนุญาตให้ User สามารถกดยกเลิกการลงทะเบียนของตัวเองได้
       allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
@@ -86,6 +86,11 @@ service cloud.firestore {
     match /mail/{mailId} {
       allow create: if isAdmin();
       allow read, update, delete: if false;
+    }
+
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
     }
   }
 }

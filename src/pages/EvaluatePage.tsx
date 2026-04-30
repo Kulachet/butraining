@@ -8,7 +8,7 @@ import { Loader2, ArrowLeft, Send, CheckCircle2 } from "lucide-react";
 import toast from "react-hot-toast";
 import { motion } from "motion/react";
 
-const QUESTIONS = [
+const DEFAULT_QUESTIONS = [
   "หัวข้อการอบรมมีความน่าสนใจและทันสมัย",
   "การอบรมครอบคลุมเนื้อหาได้ครบถ้วน",
   "เนื้อหาสาระ และกิจกรรมของการอบรม เหมาะสม",
@@ -24,20 +24,28 @@ const QUESTIONS = [
 export const EvaluatePage: React.FC = () => {
   const { courseId } = useParams<{ courseId: string }>();
   const navigate = useNavigate();
-  const { user, loading: authLoading } = useAuth();
+  const { user, loading: authLoading, login } = useAuth();
   
   const [course, setCourse] = useState<Course | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [hasEvaluated, setHasEvaluated] = useState(false);
+  const [questions, setQuestions] = useState<string[]>(DEFAULT_QUESTIONS);
   
   const [ratings, setRatings] = useState<Record<number, number>>({});
   const [suggestion, setSuggestion] = useState("");
 
   useEffect(() => {
     const checkStatus = async () => {
-      if (!courseId || !user) return;
       try {
+        // Fetch questions from settings first
+        const settingsDoc = await getDoc(doc(db, "settings", "evaluation"));
+        if (settingsDoc.exists() && settingsDoc.data().questions) {
+          setQuestions(settingsDoc.data().questions);
+        }
+
+        if (!courseId) return;
+
         // Fetch course
         const courseDoc = await getDoc(doc(db, "courses", courseId));
         if (courseDoc.exists()) {
@@ -47,6 +55,8 @@ export const EvaluatePage: React.FC = () => {
           navigate("/");
           return;
         }
+
+        if (!user) return;
 
         // Check if already evaluated
         const existingEvalQ = query(
@@ -66,11 +76,7 @@ export const EvaluatePage: React.FC = () => {
       }
     };
     
-    if (!authLoading && user) {
-      checkStatus();
-    } else if (!authLoading && !user) {
-      setLoading(false);
-    }
+    checkStatus();
   }, [courseId, user, authLoading, navigate]);
 
   if (authLoading || loading) {
@@ -82,7 +88,32 @@ export const EvaluatePage: React.FC = () => {
   }
 
   if (!user) {
-    return <Navigate to="/" />;
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white max-w-md w-full rounded-3xl p-8 shadow-xl border border-slate-100 text-center"
+        >
+          <div className="w-20 h-20 bg-crimson/10 rounded-full flex items-center justify-center mx-auto mb-6">
+            <Loader2 className="w-10 h-10 text-crimson" />
+          </div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">กรุณาเข้าสู่ระบบ</h2>
+          <p className="text-slate-500 mb-8 leading-relaxed">
+            ท่านจำเป็นต้องเข้าสู่ระบบด้วยอีเมล @bu.ac.th เพื่อทำแบบประเมินความพึงพอใจของหลักสูตรนี้
+          </p>
+          <button 
+            onClick={login}
+            className="w-full bg-crimson hover:bg-crimson-dark text-white font-bold py-4 rounded-xl shadow-lg shadow-crimson/20 transition-all flex items-center justify-center gap-2"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+            </svg>
+            เข้าสู่ระบบเพื่อทำแบบประเมิน
+          </button>
+        </motion.div>
+      </div>
+    );
   }
 
   if (hasEvaluated) {
@@ -118,7 +149,7 @@ export const EvaluatePage: React.FC = () => {
     if (!user || !courseId) return;
 
     // Validate
-    if (Object.keys(ratings).length < QUESTIONS.length) {
+    if (Object.keys(ratings).length < questions.length) {
       toast.error("กรุณาให้คะแนนให้ครบทุกข้อ");
       return;
     }
@@ -171,7 +202,7 @@ export const EvaluatePage: React.FC = () => {
             </div>
             
             <div className="divide-y divide-slate-100">
-              {QUESTIONS.map((q, i) => (
+              {questions.map((q, i) => (
                 <div key={i} className="p-4 md:p-0 md:grid md:grid-cols-12 gap-4 items-center hover:bg-slate-50 transition-colors">
                   <div className="col-span-7 md:p-4 text-sm font-medium text-slate-700 leading-relaxed mb-4 md:mb-0">
                     <span className="text-crimson mr-2">{i + 1}.</span> {q}
@@ -205,7 +236,7 @@ export const EvaluatePage: React.FC = () => {
           </div>
 
           <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
-            <label className="block text-sm font-bold text-slate-700 mb-3">11. ข้อเสนอแนะเพิ่มเติม</label>
+            <label className="block text-sm font-bold text-slate-700 mb-3">{questions.length + 1}. ข้อเสนอแนะเพิ่มเติม</label>
             <textarea 
               value={suggestion}
               onChange={(e) => setSuggestion(e.target.value)}

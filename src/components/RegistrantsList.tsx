@@ -66,6 +66,9 @@ export const RegistrantsList: React.FC = () => {
   
   const [instructorMap, setInstructorMap] = useState<Record<string, string>>({});
   const [deleteConfirm, setDeleteConfirm] = useState<{regId: string, courseId: string, sessionId: string | null} | null>(null);
+  const [selectedRegIds, setSelectedRegIds] = useState<string[]>([]);
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   
   // Eval states
   const [showEvalModal, setShowEvalModal] = useState(false);
@@ -144,6 +147,78 @@ export const RegistrantsList: React.FC = () => {
     
     return matchesSearch && matchesTab;
   });
+
+  const toggleSelectAll = () => {
+    if (selectedRegIds.length === filteredRegistrations.length) {
+      setSelectedRegIds([]);
+    } else {
+      setSelectedRegIds(filteredRegistrations.map(r => r.id));
+    }
+  };
+
+  const toggleSelectReg = (id: string) => {
+    setSelectedRegIds(prev => 
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedRegIds.length === 0 || !selectedCourseId) return;
+    
+    setBulkDeleteConfirm(false);
+    setIsBulkDeleting(true);
+    const toastId = toast.loading(`กำลังลบ ${selectedRegIds.length} รายการ...`);
+
+    try {
+      const courseRef = doc(db, "courses", selectedCourseId);
+      const courseDoc = await getDoc(courseRef);
+      
+      if (!courseDoc.exists()) throw new Error("Course not found");
+      const currentCourse = courseDoc.data() as Course;
+      let updatedSessions = [...(currentCourse.sessions || [])];
+      let enrolledSeats = currentCourse.enrolledSeats || 0;
+      let totalRegistrations = currentCourse.totalRegistrations || 0;
+
+      // Group deletions by session to update seats correctly
+      const regsToDelete = registrations.filter(r => selectedRegIds.includes(r.id));
+      
+      for (const reg of regsToDelete) {
+        // Delete registration
+        await deleteDoc(doc(db, "registrations", reg.id));
+
+        // Update seats logic
+        if (reg.sessionId) {
+          let sessionIndex = updatedSessions.findIndex(s => s.sessionId === reg.sessionId);
+          if (sessionIndex === -1 && updatedSessions.length > 0) sessionIndex = 0;
+          if (sessionIndex !== -1 && updatedSessions[sessionIndex].enrolledSeats > 0) {
+            updatedSessions[sessionIndex].enrolledSeats -= 1;
+          }
+        } else {
+          if (updatedSessions.length > 0 && updatedSessions[0].enrolledSeats > 0) {
+            updatedSessions[0].enrolledSeats -= 1;
+          } else if (enrolledSeats > 0) {
+            enrolledSeats -= 1;
+          }
+        }
+        totalRegistrations = Math.max(0, totalRegistrations - 1);
+      }
+
+      // Update course once
+      await updateDoc(courseRef, { 
+        sessions: updatedSessions,
+        enrolledSeats: enrolledSeats,
+        totalRegistrations: totalRegistrations
+      });
+
+      setSelectedRegIds([]);
+      toast.success(`ลบ ${regsToDelete.length} รายการเรียบร้อยแล้ว`, { id: toastId });
+    } catch (error) {
+      console.error("Bulk delete error:", error);
+      toast.error("เกิดข้อผิดพลาดในการลบข้อมูล", { id: toastId });
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  };
 
   const handleExportCSV = () => {
     if (filteredRegistrations.length === 0) {
@@ -289,11 +364,14 @@ export const RegistrantsList: React.FC = () => {
       email: auth.currentUser?.email || "test@admin.com",
       name: "แอดมิน (ทดสอบ)",
       sequence: 1
-    }] : selectedRecipients.map(r => ({
-      email: r.userEmail,
-      name: formatInstructorName(r.userName),
-      sequence: r.checkInSequenceNumber || 0
-    }));
+    }] : selectedRecipients.map(r => {
+      const globalIndex = certRecipients.findIndex(cr => cr.id === r.id);
+      return {
+        email: r.userEmail,
+        name: formatInstructorName(r.userName),
+        sequence: globalIndex + 1
+      };
+    });
 
     const payload = {
       action: isTest ? "test_send" : "send_certificates",
@@ -388,6 +466,49 @@ export const RegistrantsList: React.FC = () => {
     }
   };
 
+  const handleExportAttendees = () => {
+    if (!selectedCourseId) {
+      toast.error("กรุณาเลือกหลักสูตรก่อน");
+      return;
+    }
+
+    const attendees = registrations
+      .filter(r => r.attended)
+      .sort((a, b) => (a.checkInSequenceNumber || a.sequenceNumber || 0) - (b.checkInSequenceNumber || b.sequenceNumber || 0));
+
+    if (attendees.length === 0) {
+      toast.error("ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว");
+      return;
+    }
+
+    const selectedCourse = courses.find(c => c.id === selectedCourseId);
+    
+    const data = attendees.map((reg, index) => ({
+      "ลำดับที่ (ใบประกาศ)": index + 1,
+      "ลำดับการเช็คอิน": reg.checkInSequenceNumber || "-",
+      "ลำดับ (ระบบ)": reg.sequenceNumber,
+      "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
+      "ชื่อ-นามสกุล": formatInstructorName(reg.userName),
+      "อีเมล": reg.userEmail,
+      "หน่วยงาน": reg.userDepartment,
+      "ตำแหน่ง": reg.userPosition,
+      "เวลาเช็คอิน": reg.checkInAt ? new Date(reg.checkInAt).toLocaleString('th-TH') : "-"
+    }));
+
+    const csv = Papa.unparse(data);
+    const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `รายชื่อผู้มาอบรมจริง_${selectedCourse?.title || 'หลักสูตร'}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    toast.success("ส่งออกรายชื่อผู้มาอบรมจริงเรียบร้อยแล้ว");
+  };
+
   const handleToggleEvalRecipient = (regId: string) => {
     setEvalSelectedIds(prev => 
       prev.includes(regId) ? prev.filter(id => id !== regId) : [...prev, regId]
@@ -406,7 +527,7 @@ export const RegistrantsList: React.FC = () => {
       return;
     }
 
-    const selectedRegs = filteredRegistrations.filter(r => reminderSelectedIds.includes(r.id));
+    const selectedRegs = registrations.filter(r => reminderSelectedIds.includes(r.id));
 
     if (selectedRegs.length === 0 && !isTest) {
       toast.error("กรุณาเลือกผู้รับอย่างน้อย 1 คน");
@@ -472,10 +593,10 @@ export const RegistrantsList: React.FC = () => {
     }
     
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
-    // Construct the absolute evaluation URL. (origin + hash router path)
-    const evalLink = `${window.location.origin}${window.location.pathname}#/evaluate/${selectedCourseId}`;
+    // Construct the absolute evaluation URL.
+    const evalLink = `${window.location.origin}${window.location.pathname.replace(/\/$/, "")}/#/evaluate/${selectedCourseId}`;
 
-    const recipients = filteredRegistrations
+    const recipients = registrations
       .filter(r => evalSelectedIds.includes(r.id))
       .map(r => ({
         email: r.userEmail,
@@ -628,9 +749,9 @@ export const RegistrantsList: React.FC = () => {
                 toast.error("กรุณาเลือกหลักสูตรก่อน");
                 return;
               }
-              const attendees = filteredRegistrations
-                .filter(r => r.attended && r.checkInSequenceNumber)
-                .sort((a, b) => (a.checkInSequenceNumber || 0) - (b.checkInSequenceNumber || 0));
+              const attendees = registrations
+                .filter(r => r.attended)
+                .sort((a, b) => (a.checkInSequenceNumber || a.sequenceNumber || 0) - (b.checkInSequenceNumber || b.sequenceNumber || 0));
               
               if (attendees.length === 0) {
                 toast.error("ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว");
@@ -653,7 +774,7 @@ export const RegistrantsList: React.FC = () => {
                 toast.error("กรุณาเลือกหลักสูตรก่อน");
                 return;
               }
-              const allRegs = filteredRegistrations;
+              const allRegs = registrations;
               if (allRegs.length === 0) {
                 toast.error("ไม่มีผู้ลงทะเบียนในหลักสูตรนี้");
                 return;
@@ -683,7 +804,7 @@ export const RegistrantsList: React.FC = () => {
                 toast.error("กรุณาเลือกหลักสูตรก่อน");
                 return;
               }
-              const attendees = filteredRegistrations.filter(r => r.attended);
+              const attendees = registrations.filter(r => r.attended);
               if (attendees.length === 0) {
                 toast.error("ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว");
                 return;
@@ -695,6 +816,13 @@ export const RegistrantsList: React.FC = () => {
           >
             <FileText className="w-4 h-4" />
             ส่งแบบประเมินผล
+          </button>
+          <button 
+            onClick={handleExportAttendees}
+            className="flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#4A4A4A] rounded-xl text-[13px] font-medium transition-all border border-slate-200"
+          >
+            <Download className="w-4 h-4" />
+            ดาวน์โหลดที่มาอบรมจริง
           </button>
           <button 
             onClick={handleExportEvals}
@@ -744,6 +872,15 @@ export const RegistrantsList: React.FC = () => {
             >
               <QrCode className="w-4 h-4" />
               QR Code Check-in
+            </button>
+          )}
+          {selectedRegIds.length > 0 && (
+            <button 
+              onClick={() => setBulkDeleteConfirm(true)}
+              className="flex items-center justify-center gap-2 px-4 py-2.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl text-[13px] font-bold transition-all border border-red-100 shadow-sm"
+            >
+              <Trash2 className="w-4 h-4" />
+              ลบที่เลือก ({selectedRegIds.length})
             </button>
           )}
         </div>
@@ -811,6 +948,14 @@ export const RegistrantsList: React.FC = () => {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50/50 border-b border-slate-100">
+                  <th className="px-6 py-5 text-center w-12">
+                    <input 
+                      type="checkbox"
+                      checked={selectedRegIds.length === filteredRegistrations.length && filteredRegistrations.length > 0}
+                      onChange={toggleSelectAll}
+                      className="w-4 h-4 rounded text-crimson focus:ring-crimson cursor-pointer border-slate-300"
+                    />
+                  </th>
                   <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับสมัคร</th>
                   <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับเช็คอิน</th>
                   <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">รหัสอาจารย์</th>
@@ -823,6 +968,14 @@ export const RegistrantsList: React.FC = () => {
               <tbody className="divide-y divide-slate-50">
                 {filteredRegistrations.map((reg, index) => (
                   <tr key={reg.id} className="hover:bg-slate-50/50 transition-colors group">
+                    <td className="px-6 py-4 text-center">
+                      <input 
+                        type="checkbox"
+                        checked={selectedRegIds.includes(reg.id)}
+                        onChange={() => toggleSelectReg(reg.id)}
+                        className="w-4 h-4 rounded text-crimson focus:ring-crimson cursor-pointer border-slate-300"
+                      />
+                    </td>
                     <td className="px-8 py-4">
                       <span className="text-[14px] lg:text-[16px] font-bold text-slate-300 group-hover:text-crimson transition-colors">
                         {String(reg.sequenceNumber).padStart(2, '0')}
@@ -1057,14 +1210,14 @@ export const RegistrantsList: React.FC = () => {
                         <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
                           <tr>
                             <th className="px-4 py-3 font-bold text-slate-500 w-12 text-center">เลือก</th>
-                            <th className="px-4 py-3 font-bold text-slate-500 w-24">ลำดับ Check-in</th>
+                            <th className="px-4 py-3 font-bold text-slate-500 w-24">ลำดับใบประกาศ</th>
                             <th className="px-4 py-3 font-bold text-slate-500">ชื่อ-นามสกุล</th>
                             <th className="px-4 py-3 font-bold text-slate-500">อีเมล</th>
                             <th className="px-4 py-3 font-bold text-slate-500 text-center">สถานะเดิม</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {certRecipients.map(r => {
+                          {certRecipients.map((r, index) => {
                             const isSelected = certSelectedIds.includes(r.id);
                             return (
                               <tr 
@@ -1082,7 +1235,7 @@ export const RegistrantsList: React.FC = () => {
                                     <Square className="w-5 h-5 text-slate-300 mx-auto" />
                                   )}
                                 </td>
-                                <td className="px-4 py-3 font-black text-indigo-600">{r.checkInSequenceNumber}</td>
+                                <td className="px-4 py-3 font-black text-indigo-600">{index + 1}</td>
                                 <td className="px-4 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
                                 <td className="px-4 py-3 text-slate-500 text-xs">{r.userEmail}</td>
                                 <td className="px-4 py-3 text-center">
@@ -1136,16 +1289,19 @@ export const RegistrantsList: React.FC = () => {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {certRecipients.filter(r => certSelectedIds.includes(r.id)).map(r => (
-                            <tr key={r.id}>
-                              <td className="px-5 py-3">
-                                <span className="bg-slate-100 text-slate-700 px-2 py-1 rounded-lg font-mono text-xs font-bold">{r.checkInSequenceNumber}.pdf</span>
-                              </td>
-                              <td className="px-5 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
-                              <td className="px-5 py-3 text-slate-500 italic">เรียน {formatInstructorName(r.userName)}...</td>
-                              <td className="px-5 py-3 text-indigo-600 font-medium">{r.userEmail}</td>
-                            </tr>
-                          ))}
+                          {certRecipients.filter(r => certSelectedIds.includes(r.id)).map(r => {
+                            const globalIndex = certRecipients.findIndex(cr => cr.id === r.id);
+                            return (
+                              <tr key={r.id}>
+                                <td className="px-5 py-3">
+                                  <span className="bg-slate-100 text-slate-700 px-2 py-1 rounded-lg font-mono text-xs font-bold">{globalIndex + 1}.pdf</span>
+                                </td>
+                                <td className="px-5 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
+                                <td className="px-5 py-3 text-slate-500 italic">เรียน {formatInstructorName(r.userName)}...</td>
+                                <td className="px-5 py-3 text-indigo-600 font-medium">{r.userEmail}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -1240,28 +1396,53 @@ export const RegistrantsList: React.FC = () => {
 
             <div className="flex-1 overflow-y-auto pr-2 mb-6 space-y-4">
               <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl">
-                <h4 className="text-sm font-semibold text-blue-800 mb-2">รายชื่อผู้ที่มาอบรมจริง ({evalSelectedIds.length} คน ที่ถูกเลือก)</h4>
-                <div className="max-h-48 overflow-y-auto space-y-2">
-                  {filteredRegistrations.filter(r => r.attended).map(r => {
+                <div className="flex items-center justify-between mb-3 px-1">
+                  <h4 className="text-sm font-semibold text-blue-800">รายชื่อผู้ที่มาอบรมจริง ({evalSelectedIds.length} คน ที่ถูกเลือก)</h4>
+                  <button 
+                    onClick={() => {
+                      const attendees = registrations.filter(r => r.attended);
+                      if (evalSelectedIds.length === attendees.length) setEvalSelectedIds([]);
+                      else setEvalSelectedIds(attendees.map(a => a.id));
+                    }}
+                    className="text-xs font-bold text-blue-600 hover:text-blue-700 bg-white px-2 py-1 rounded-lg border border-blue-100"
+                  >
+                    {evalSelectedIds.length === registrations.filter(r => r.attended).length ? "ไม่เลือกทั้งหมด" : "เลือกทั้งหมด"}
+                  </button>
+                </div>
+                <div className="max-h-64 overflow-y-auto space-y-2">
+                  {registrations.filter(r => r.attended).map(r => {
                     const isSelected = evalSelectedIds.includes(r.id);
                     return (
-                      <div key={r.id} className="flex items-center gap-3 p-2 bg-white rounded-lg border border-blue-100">
+                      <div key={r.id} className="flex items-center gap-3 p-3 bg-white rounded-xl border border-blue-100 group">
                         <input 
                           type="checkbox"
                           checked={isSelected}
                           onChange={() => handleToggleEvalRecipient(r.id)}
-                          className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer border-slate-300 ml-2"
+                          className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer border-slate-300"
                         />
-                        <div className="flex flex-col flex-1">
-                          <span className="text-sm font-medium text-slate-700 cursor-pointer" onClick={() => handleToggleEvalRecipient(r.id)}>{formatInstructorName(r.userName)}</span>
+                        <div 
+                          className="flex flex-col flex-1 cursor-pointer" 
+                          onClick={() => handleToggleEvalRecipient(r.id)}
+                        >
+                          <span className="text-sm font-bold text-slate-700">{formatInstructorName(r.userName)}</span>
                           <span className="text-[11px] text-slate-500">{r.userEmail}</span>
                         </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteClick(r.id, r.courseId, r.sessionId || null);
+                          }}
+                          className="p-2 text-slate-200 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                          title="ลบผู้ลงทะเบียน"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
                     );
                   })}
-                  {filteredRegistrations.filter(r => r.attended).length === 0 && (
-                    <div className="text-sm text-blue-500 text-center py-4 bg-white rounded-lg border border-blue-100">
-                      - ไม่มีผู้เข้าร่วมอบรม -
+                  {registrations.filter(r => r.attended).length === 0 && (
+                    <div className="text-sm text-blue-500 text-center py-8 bg-white rounded-xl border border-blue-100 border-dashed">
+                      - ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว -
                     </div>
                   )}
                 </div>
@@ -1355,12 +1536,12 @@ export const RegistrantsList: React.FC = () => {
                   <div className="flex items-center justify-between mb-3 px-1">
                     <div className="flex items-center gap-2">
                       <Users className="w-4 h-4 text-amber-600" />
-                      <h4 className="text-sm font-bold text-slate-700">ผู้รับอีเมลทั้งหมด ({filteredRegistrations.length} คน)</h4>
+                      <h4 className="text-sm font-bold text-slate-700">ผู้รับอีเมลทั้งหมด ({registrations.length} คน)</h4>
                     </div>
                   </div>
                   <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white max-h-[450px] flex-1 flex flex-col">
                     <div className="overflow-y-auto flex-1 p-3 space-y-2">
-                      {filteredRegistrations.map(r => {
+                      {registrations.map(r => {
                         const isSelected = reminderSelectedIds.includes(r.id);
                         return (
                           <div 
@@ -1398,7 +1579,7 @@ export const RegistrantsList: React.FC = () => {
                           </div>
                         );
                       })}
-                      {filteredRegistrations.length === 0 && (
+                      {registrations.length === 0 && (
                         <div className="text-center py-10 text-slate-400 text-sm">
                           ไม่มีผู้ลงทะเบียนในหลักสูตรนี้
                         </div>
@@ -1470,6 +1651,39 @@ export const RegistrantsList: React.FC = () => {
                 className="flex-1 py-3 px-4 bg-red-500 hover:bg-red-600 text-white font-medium rounded-xl transition-colors"
               >
                 ยืนยันการลบ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Delete Confirmation Modal */}
+      {bulkDeleteConfirm && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div 
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            onClick={() => setBulkDeleteConfirm(false)}
+          />
+          <div className="relative bg-white rounded-3xl shadow-2xl p-8 max-w-sm w-full text-center">
+            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Trash2 className="w-8 h-8 text-red-500" />
+            </div>
+            <h3 className="text-xl font-bold text-slate-900 mb-2">ยืนยันการลบหลายรายการ</h3>
+            <p className="text-slate-500 mb-8">
+              คุณแน่ใจหรือไม่ว่าต้องการลบผู้ลงทะเบียนที่เลือกทั้งหมด <b>{selectedRegIds.length} รายการ</b>? การกระทำนี้ไม่สามารถย้อนกลับได้
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setBulkDeleteConfirm(false)}
+                className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={handleBulkDelete}
+                className="flex-1 py-3 px-4 bg-red-500 hover:bg-red-600 text-white font-medium rounded-xl transition-colors"
+              >
+                ยืนยันการลบทั้งหมด
               </button>
             </div>
           </div>

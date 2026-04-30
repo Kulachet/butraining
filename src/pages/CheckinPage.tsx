@@ -80,10 +80,20 @@ export const CheckinPage: React.FC = () => {
           setMessage("คุณได้เช็คอินเรียบร้อยแล้วก่อนหน้านี้");
         } else {
           try {
-            // ส่งเฉพาะฟิลด์ที่จำเป็นและตรงกับ Security Rules
+            // คำนวณลำดับการเช็คอินใหม่ โดยนับจำนวนผู้ที่เช็คอินแล้วในหลักสูตรนี้
+            const qAttendees = query(
+              collection(db, "registrations"),
+              where("courseId", "==", courseId),
+              where("attended", "==", true)
+            );
+            const attendeesSnap = await getDocs(qAttendees);
+            const nextSequence = attendeesSnap.size + 1;
+
+            // ส่งข้อมูลการเช็คอินพร้อมลำดับที่
             await updateDoc(regRef, {
               attended: true,
-              checkInAt: new Date().toISOString()
+              checkInAt: new Date().toISOString(),
+              checkInSequenceNumber: nextSequence
             });
             setStatus("success");
             setMessage("เช็คอินสำเร็จ! ยินดีต้อนรับเข้าสู่การอบรม");
