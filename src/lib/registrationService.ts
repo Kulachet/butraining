@@ -149,7 +149,7 @@ export const RegistrationService = {
     const attendedUsers = registrations.filter(r => r.attended);
 
     for (const reg of attendedUsers) {
-      const certificateUrl = `https://drive.google.com/uc?id=${course.driveFolderId}&export=download&filename=${reg.sequenceNumber}.pdf`;
+      const certificateUrl = `https://drive.google.com/uc?id=${course.driveFolderId}&export=download&filename=${reg.sequenceNumber}.png`;
       
       await addDoc(mailRef, {
         to: reg.userEmail,

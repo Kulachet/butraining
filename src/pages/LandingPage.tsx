@@ -131,7 +131,7 @@ export const LandingPage: React.FC = () => {
       toast.success("ลงทะเบียนสำเร็จ! ระบบกำลังส่งคำเชิญลงปฏิทินของคุณ...");
       
       // Auto-send Calendar Invite via GAS
-      const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
+      const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
       const payload = {
         courseTitle: course.title,
         description: course.description || "",

@@ -312,7 +312,7 @@ export const RegistrantsList: React.FC = () => {
     setIsValidatingCert(true);
     try {
       // Create a specific GAS URL for Cert system as requested
-      const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
+      const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
       
       const response = await fetch(gasUrl, {
         method: "POST",
@@ -382,7 +382,7 @@ export const RegistrantsList: React.FC = () => {
       recipients: recipients
     };
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
 
     try {
       setIsSendingCerts(true);
@@ -558,7 +558,7 @@ export const RegistrantsList: React.FC = () => {
     };
 
     // ใช้ URL สำหรับระบบ Reminder
-    const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
 
     try {
       setIsSendingReminder(true);
@@ -610,7 +610,7 @@ export const RegistrantsList: React.FC = () => {
       recipients: recipients
     };
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbxhI5VV3YnjVvGmUg6K3SEhDG09iiYARL89nkGiJAobMshgn4_HRiWptifpKmOZ94Rb/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
 
     try {
       toast.loading("กำลังส่งอีเมลลิงก์ประเมินผล...", { id: "send_eval" });
@@ -1153,7 +1153,7 @@ export const RegistrantsList: React.FC = () => {
                       <div className="p-3 bg-amber-50 rounded-xl border border-amber-100 flex gap-2">
                         <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                         <p className="text-[11px] text-amber-700 leading-relaxed">
-                          * ชื่อไฟล์ในโฟลเดอร์ต้องเป็นลำดับเลขตรงกับลำดับเช็คอิน เช่น <b>1.pdf, 2.pdf</b> <br />
+                          * ชื่อไฟล์ในโฟลเดอร์ต้องเป็นลำดับเลขตรงกับลำดับเช็คอิน เช่น <b>1.png, 2.png</b> <br />
                           * ตรวจสอบให้มั่นใจว่าโฟลเดอร์ถูกตั้งค่าแชร์เป็น <b>"ทุกคนที่มีลิงก์ (Anyone with the link)"</b>
                         </p>
                       </div>
@@ -1294,7 +1294,7 @@ export const RegistrantsList: React.FC = () => {
                             return (
                               <tr key={r.id}>
                                 <td className="px-5 py-3">
-                                  <span className="bg-slate-100 text-slate-700 px-2 py-1 rounded-lg font-mono text-xs font-bold">{globalIndex + 1}.pdf</span>
+                                  <span className="bg-slate-100 text-slate-700 px-2 py-1 rounded-lg font-mono text-xs font-bold">{globalIndex + 1}.png</span>
                                 </td>
                                 <td className="px-5 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
                                 <td className="px-5 py-3 text-slate-500 italic">เรียน {formatInstructorName(r.userName)}...</td>
