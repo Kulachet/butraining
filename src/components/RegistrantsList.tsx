@@ -65,6 +65,10 @@ export const RegistrantsList: React.FC = () => {
   const [isSendingCerts, setIsSendingCerts] = useState(false);
   const [certSendingProgress, setCertSendingProgress] = useState({ current: 0, total: 0 });
   
+  const [customCertRecipients, setCustomCertRecipients] = useState<{id: string, name: string, email: string}[]>([]);
+  const [newCustomCertName, setNewCustomCertName] = useState("");
+  const [newCustomCertEmail, setNewCustomCertEmail] = useState("");
+  
   const [instructorMap, setInstructorMap] = useState<Record<string, string>>({});
   const [deleteConfirm, setDeleteConfirm] = useState<{regId: string, courseId: string, sessionId: string | null} | null>(null);
   const [selectedRegIds, setSelectedRegIds] = useState<string[]>([]);
@@ -344,9 +348,10 @@ export const RegistrantsList: React.FC = () => {
       return;
     }
 
-    const selectedRecipients = certRecipients.filter(r => certSelectedIds.includes(r.id));
+    const selectedRecipientsFromRegistrations = certRecipients.filter(r => certSelectedIds.includes(r.id));
+    const selectedCustomRecipients = customCertRecipients.filter(r => certSelectedIds.includes(r.id));
 
-    if (selectedRecipients.length === 0 && !isTest) {
+    if (selectedRecipientsFromRegistrations.length === 0 && selectedCustomRecipients.length === 0 && !isTest) {
       toast.error("ไม่มีรายชื่อผู้รับในรายการ");
       return;
     }
@@ -363,19 +368,32 @@ export const RegistrantsList: React.FC = () => {
 
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
     
+    // Combine regular recipients and custom ones
+    const allSelectedRecipients = [
+      ...selectedRecipientsFromRegistrations.map(r => {
+        const globalIndex = certRecipients.findIndex(cr => cr.id === r.id);
+        return {
+          email: r.userEmail,
+          name: formatInstructorName(r.userName),
+          sequence: globalIndex + 1
+        };
+      }),
+      ...selectedCustomRecipients.map(r => {
+        const customIndex = customCertRecipients.findIndex(ccr => ccr.id === r.id);
+        return {
+          email: r.email,
+          name: formatInstructorName(r.name),
+          sequence: certRecipients.length + customIndex + 1
+        };
+      })
+    ];
+
     // For test send, use currently logged in admin email
     const recipients = isTest ? [{
       email: auth.currentUser?.email || "test@admin.com",
       name: "แอดมิน (ทดสอบ)",
       sequence: 1
-    }] : selectedRecipients.map(r => {
-      const globalIndex = certRecipients.findIndex(cr => cr.id === r.id);
-      return {
-        email: r.userEmail,
-        name: formatInstructorName(r.userName),
-        sequence: globalIndex + 1
-      };
-    });
+    }] : allSelectedRecipients;
 
     const payload = {
       action: isTest ? "test_send" : "send_certificates",
@@ -773,6 +791,7 @@ export const RegistrantsList: React.FC = () => {
               }
               setCertRecipients(attendees);
               setCertSelectedIds(attendees.map(a => a.id));
+              setCustomCertRecipients([]); // Reset custom recipients
               setIsPreviewMode(false);
               setCertFolderStats(null);
               setShowCertModal(true);
@@ -1202,24 +1221,80 @@ export const RegistrantsList: React.FC = () => {
                     </div>
                   </div>
 
+                  {/* Manual Entry Section */}
+                  <div className="bg-indigo-50/50 p-5 rounded-2xl border border-indigo-100">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Plus className="w-4 h-4 text-indigo-600" />
+                      <h4 className="text-sm font-bold text-slate-700">เพิ่มรายชื่อเพิ่มเติม (Manual Entry)</h4>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold text-slate-400 ml-1">ชื่อ-นามสกุล</label>
+                        <input 
+                          type="text"
+                          placeholder="เช่น อ.สมชาย ใจดี"
+                          value={newCustomCertName}
+                          onChange={(e) => setNewCustomCertName(e.target.value)}
+                          className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold text-slate-400 ml-1">อีเมล (@bu.ac.th)</label>
+                        <input 
+                          type="email"
+                          placeholder="example@bu.ac.th"
+                          value={newCustomCertEmail}
+                          onChange={(e) => setNewCustomCertEmail(e.target.value)}
+                          className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
+                        />
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        if (!newCustomCertName || !newCustomCertEmail) {
+                          toast.error("กรุณากรอกทั้งชื่อและอีเมล");
+                          return;
+                        }
+                        if (!newCustomCertEmail.includes("@")) {
+                          toast.error("รูปแบบอีเมลไม่ถูกต้อง");
+                          return;
+                        }
+                        const newId = `custom-${Date.now()}`;
+                        setCustomCertRecipients(prev => [
+                          ...prev, 
+                          { id: newId, name: newCustomCertName, email: newCustomCertEmail }
+                        ]);
+                        setCertSelectedIds(prev => [...prev, newId]);
+                        setNewCustomCertName("");
+                        setNewCustomCertEmail("");
+                        toast.success("เพิ่มรายชื่อเรียบร้อย ลำดับจะรันต่อท้ายคนสุดท้าย");
+                      }}
+                      className="w-full py-2.5 bg-indigo-600 text-white text-sm font-bold rounded-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Plus className="w-4 h-4" />
+                      เพิ่มรายชื่อลงในคิวส่ง
+                    </button>
+                  </div>
+
                   {/* Recipients Selection */}
                   <div>
                     <div className="flex items-center justify-between mb-3 px-1">
                       <div className="flex items-center gap-2">
                         <Users className="w-4 h-4 text-indigo-600" />
-                        <h4 className="text-sm font-bold text-slate-700">รายชื่อผู้ที่มาอบรมจริง ({certRecipients.length} คน)</h4>
+                        <h4 className="text-sm font-bold text-slate-700">รายชื่อผู้ที่มาอบรมจริงและเพิ่มเติม ({certRecipients.length + customCertRecipients.length} คน)</h4>
                       </div>
                       <button 
                         onClick={() => {
-                          if (certSelectedIds.length === certRecipients.length) setCertSelectedIds([]);
-                          else setCertSelectedIds(certRecipients.map(r => r.id));
+                          const allIds = [...certRecipients.map(r => r.id), ...customCertRecipients.map(r => r.id)];
+                          if (certSelectedIds.length === allIds.length) setCertSelectedIds([]);
+                          else setCertSelectedIds(allIds);
                         }}
                         className="text-xs font-bold text-indigo-600 hover:text-indigo-700"
                       >
-                        {certSelectedIds.length === certRecipients.length ? "ไม่เลือกทั้งหมด" : "เลือกทั้งหมด"}
+                        {certSelectedIds.length === (certRecipients.length + customCertRecipients.length) ? "ไม่เลือกทั้งหมด" : "เลือกทั้งหมด"}
                       </button>
                     </div>
-                    <div className="border border-slate-200 rounded-2xl overflow-hidden max-h-[300px] overflow-y-auto bg-white">
+                    <div className="border border-slate-200 rounded-2xl overflow-hidden max-h-[350px] overflow-y-auto bg-white">
                       <table className="w-full text-left text-sm border-collapse">
                         <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
                           <tr>
@@ -1227,7 +1302,7 @@ export const RegistrantsList: React.FC = () => {
                             <th className="px-4 py-3 font-bold text-slate-500 w-24">ลำดับใบประกาศ</th>
                             <th className="px-4 py-3 font-bold text-slate-500">ชื่อ-นามสกุล</th>
                             <th className="px-4 py-3 font-bold text-slate-500">อีเมล</th>
-                            <th className="px-4 py-3 font-bold text-slate-500 text-center">สถานะเดิม</th>
+                            <th className="px-4 py-3 font-bold text-slate-500 text-center">จัดการ/สถานะ</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -1260,6 +1335,47 @@ export const RegistrantsList: React.FC = () => {
                                   ) : (
                                     <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full text-[10px] font-bold">ยังไม่ส่ง</span>
                                   )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          {customCertRecipients.map((r, index) => {
+                            const isSelected = certSelectedIds.includes(r.id);
+                            return (
+                              <tr 
+                                key={r.id} 
+                                className={cn(
+                                  "hover:bg-indigo-50/50 transition-colors cursor-pointer bg-indigo-50/20",
+                                  isSelected ? "bg-indigo-50/50" : ""
+                                )}
+                                onClick={() => handleToggleCertRecipient(r.id)}
+                              >
+                                <td className="px-4 py-3 text-center">
+                                  {isSelected ? (
+                                    <CheckSquare className="w-5 h-5 text-indigo-600 mx-auto" />
+                                  ) : (
+                                    <Square className="w-5 h-5 text-slate-300 mx-auto" />
+                                  )}
+                                </td>
+                                <td className="px-4 py-3 font-black text-amber-600 italic">
+                                  {certRecipients.length + index + 1}
+                                </td>
+                                <td className="px-4 py-3 font-bold text-slate-700 flex items-center gap-2">
+                                  {formatInstructorName(r.name)}
+                                  <span className="text-[9px] bg-amber-100 text-amber-700 px-1.5 rounded-full font-bold uppercase">Manual</span>
+                                </td>
+                                <td className="px-4 py-3 text-slate-500 text-xs">{r.email}</td>
+                                <td className="px-4 py-3 text-center">
+                                  <button 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setCustomCertRecipients(prev => prev.filter(p => p.id !== r.id));
+                                      setCertSelectedIds(prev => prev.filter(id => id !== r.id));
+                                    }}
+                                    className="p-1.5 text-slate-400 hover:text-red-500 transition-colors"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
                                 </td>
                               </tr>
                             );
@@ -1313,6 +1429,18 @@ export const RegistrantsList: React.FC = () => {
                                 <td className="px-5 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
                                 <td className="px-5 py-3 text-slate-500 italic">เรียน {formatInstructorName(r.userName)}...</td>
                                 <td className="px-5 py-3 text-indigo-600 font-medium">{r.userEmail}</td>
+                              </tr>
+                            );
+                          })}
+                          {customCertRecipients.filter(r => certSelectedIds.includes(r.id)).map((r, index) => {
+                            return (
+                              <tr key={r.id} className="bg-indigo-50/20">
+                                <td className="px-5 py-3">
+                                  <span className="bg-amber-100 text-amber-700 px-2 py-1 rounded-lg font-mono text-xs font-bold">{certRecipients.length + index + 1}.png</span>
+                                </td>
+                                <td className="px-5 py-3 font-bold text-slate-700">{formatInstructorName(r.name)}</td>
+                                <td className="px-5 py-3 text-slate-500 italic">เรียน {formatInstructorName(r.name)}...</td>
+                                <td className="px-5 py-3 text-indigo-600 font-medium">{r.email}</td>
                               </tr>
                             );
                           })}
