@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useParams, useNavigate, Navigate } from "react-router-dom";
+import { useParams, useNavigate, Navigate, useLocation } from "react-router-dom";
 import { doc, getDoc, collection, addDoc, query, where, getDocs } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { useAuth } from "../components/AuthProvider";
@@ -24,7 +24,12 @@ const DEFAULT_QUESTIONS = [
 export const EvaluatePage: React.FC = () => {
   const { courseId } = useParams<{ courseId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user, loading: authLoading, login } = useAuth();
+  
+  // Use URL query parameter as initial title if available
+  const queryParams = new URLSearchParams(location.search);
+  const titleFromUrl = queryParams.get("title");
   
   const [course, setCourse] = useState<Course | null>(null);
   const [loading, setLoading] = useState(true);
@@ -34,6 +39,8 @@ export const EvaluatePage: React.FC = () => {
   
   const [ratings, setRatings] = useState<Record<number, number>>({});
   const [suggestion, setSuggestion] = useState("");
+
+  const displayTitle = course?.title || titleFromUrl || "กำลังโหลดข้อมูล...";
 
   useEffect(() => {
     const checkStatus = async () => {
@@ -187,7 +194,7 @@ export const EvaluatePage: React.FC = () => {
 
         <div>
           <h1 className="text-3xl font-bold text-slate-800 mb-2">แบบประเมินความพึงพอใจ</h1>
-          <p className="text-slate-500">หลักสูตร: <span className="font-semibold text-crimson">{course?.title}</span></p>
+          <p className="text-slate-500">หลักสูตร: <span className="font-semibold text-crimson">{displayTitle}</span></p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">

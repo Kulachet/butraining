@@ -18,6 +18,7 @@ import {
   Settings2,
   Eye,
   Send,
+  Plus,
   AlertCircle,
   CheckSquare,
   Square,
@@ -73,6 +74,9 @@ export const RegistrantsList: React.FC = () => {
   // Eval states
   const [showEvalModal, setShowEvalModal] = useState(false);
   const [evalSelectedIds, setEvalSelectedIds] = useState<string[]>([]);
+  const [customEvalRecipients, setCustomEvalRecipients] = useState<{id: string, name: string, email: string}[]>([]);
+  const [newCustomEvalName, setNewCustomEvalName] = useState("");
+  const [newCustomEvalEmail, setNewCustomEvalEmail] = useState("");
   
   // Reminder states
   const [showReminderModal, setShowReminderModal] = useState(false);
@@ -312,7 +316,7 @@ export const RegistrantsList: React.FC = () => {
     setIsValidatingCert(true);
     try {
       // Create a specific GAS URL for Cert system as requested
-      const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
+      const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
       
       const response = await fetch(gasUrl, {
         method: "POST",
@@ -382,7 +386,7 @@ export const RegistrantsList: React.FC = () => {
       recipients: recipients
     };
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
 
     try {
       setIsSendingCerts(true);
@@ -558,7 +562,7 @@ export const RegistrantsList: React.FC = () => {
     };
 
     // ใช้ URL สำหรับระบบ Reminder
-    const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
 
     try {
       setIsSendingReminder(true);
@@ -587,21 +591,29 @@ export const RegistrantsList: React.FC = () => {
       return;
     }
 
-    if (evalSelectedIds.length === 0) {
+    if (evalSelectedIds.length === 0 && customEvalRecipients.length === 0) {
       toast.error("ไม่มีผู้รับลิงก์ประเมินผลในรายการ");
       return;
     }
     
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
     // Construct the absolute evaluation URL.
-    const evalLink = `${window.location.origin}${window.location.pathname.replace(/\/$/, "")}/#/evaluate/${selectedCourseId}`;
+    const encodedTitle = encodeURIComponent(selectedCourse?.title || "");
+    const evalLink = `${window.location.origin}${window.location.pathname.replace(/\/$/, "")}/#/evaluate/${selectedCourseId}?title=${encodedTitle}`;
 
-    const recipients = registrations
+    const attendeeRecipients = registrations
       .filter(r => evalSelectedIds.includes(r.id))
       .map(r => ({
         email: r.userEmail,
         name: formatInstructorName(r.userName)
       }));
+
+    const customRecipients = customEvalRecipients.map(r => ({
+      email: r.email,
+      name: r.name
+    }));
+
+    const recipients = [...attendeeRecipients, ...customRecipients];
 
     const payload = {
       action: "send_evaluations",
@@ -610,26 +622,28 @@ export const RegistrantsList: React.FC = () => {
       recipients: recipients
     };
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbza3DzhyY2YPZCQB-ORReOFohrezYCKzBKdr91xgVwPPPB8US1Wnw8BJtAKCws7CP3OFQ/exec";
+    const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
 
     try {
       toast.loading("กำลังส่งอีเมลลิงก์ประเมินผล...", { id: "send_eval" });
-      fetch(gasUrl, {
+      console.log("Sending evaluations payload:", payload);
+      
+      const response = await fetch(gasUrl, {
         method: "POST",
         mode: "no-cors",
         headers: {
           "Content-Type": "text/plain;charset=utf-8",
         },
         body: JSON.stringify(payload)
-      }).then(() => {
-        toast.success("ส่งลิงก์ประเมินผลสำเร็จ กรุณาตรวจสอบอีเมลผู้รับ", { id: "send_eval" });
-        setShowEvalModal(false);
-      }).catch(err => {
-        console.error(err);
-        toast.error("เกิดข้อผิดพลาดในการส่ง", { id: "send_eval" });
       });
+      
+      console.log("GAS Response (Opaque due to no-cors):", response);
+      toast.success(`ส่งลิงก์ประเมินผลสำเร็จ (${recipients.length} คน) กรุณาตรวจสอบอีเมลผู้รับ`, { id: "send_eval" });
+      setShowEvalModal(false);
+      setCustomEvalRecipients([]); // Clear custom ones after success
     } catch (error) {
-      toast.error("เกิดข้อผิดพลาด", { id: "send_eval" });
+      console.error("Error sending evaluations:", error);
+      toast.error("เกิดข้อผิดพลาดในการส่ง", { id: "send_eval" });
     }
   };
 
@@ -1394,57 +1408,141 @@ export const RegistrantsList: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto pr-2 mb-6 space-y-4">
-              <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl">
-                <div className="flex items-center justify-between mb-3 px-1">
-                  <h4 className="text-sm font-semibold text-blue-800">รายชื่อผู้ที่มาอบรมจริง ({evalSelectedIds.length} คน ที่ถูกเลือก)</h4>
-                  <button 
-                    onClick={() => {
-                      const attendees = registrations.filter(r => r.attended);
-                      if (evalSelectedIds.length === attendees.length) setEvalSelectedIds([]);
-                      else setEvalSelectedIds(attendees.map(a => a.id));
-                    }}
-                    className="text-xs font-bold text-blue-600 hover:text-blue-700 bg-white px-2 py-1 rounded-lg border border-blue-100"
-                  >
-                    {evalSelectedIds.length === registrations.filter(r => r.attended).length ? "ไม่เลือกทั้งหมด" : "เลือกทั้งหมด"}
-                  </button>
+            <div className="flex-1 overflow-y-auto pr-2 mb-6 space-y-6">
+              {/* Add Custom Person Section */}
+              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">
+                  <UserCheck className="w-4 h-4 text-blue-600" />
+                  เพิ่มผู้รับอีเมลเอง (เพิ่มเติม)
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold text-slate-400 ml-1">ชื่อ-นามสกุล</label>
+                    <input 
+                      type="text"
+                      placeholder="เช่น อ.สมชาย ใจดี"
+                      value={newCustomEvalName}
+                      onChange={(e) => setNewCustomEvalName(e.target.value)}
+                      className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold text-slate-400 ml-1">อีเมล (@bu.ac.th)</label>
+                    <input 
+                      type="email"
+                      placeholder="example@bu.ac.th"
+                      value={newCustomEvalEmail}
+                      onChange={(e) => setNewCustomEvalEmail(e.target.value)}
+                      className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm"
+                    />
+                  </div>
                 </div>
-                <div className="max-h-64 overflow-y-auto space-y-2">
-                  {registrations.filter(r => r.attended).map(r => {
-                    const isSelected = evalSelectedIds.includes(r.id);
-                    return (
-                      <div key={r.id} className="flex items-center gap-3 p-3 bg-white rounded-xl border border-blue-100 group">
-                        <input 
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => handleToggleEvalRecipient(r.id)}
-                          className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer border-slate-300"
-                        />
+                <button 
+                  onClick={() => {
+                    if (!newCustomEvalName || !newCustomEvalEmail) {
+                      toast.error("กรุณากรอกทั้งชื่อและอีเมล");
+                      return;
+                    }
+                    if (!newCustomEvalEmail.includes("@")) {
+                      toast.error("รูปแบบอีเมลไม่ถูกต้อง");
+                      return;
+                    }
+                    setCustomEvalRecipients(prev => [
+                      ...prev, 
+                      { id: Date.now().toString(), name: newCustomEvalName, email: newCustomEvalEmail }
+                    ]);
+                    setNewCustomEvalName("");
+                    setNewCustomEvalEmail("");
+                  }}
+                  className="w-full py-2 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-700 transition-all flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-4 h-4" />
+                  เพิ่มรายชื่อ
+                </button>
+              </div>
+
+              {/* Recipients List Section */}
+              <div className="space-y-4">
+                {/* Custom Recipients */}
+                {customEvalRecipients.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-700 mb-2 px-1 flex items-center justify-between">
+                      <span>รายชื่อที่เพิ่มเอง ({customEvalRecipients.length})</span>
+                      <button 
+                        onClick={() => setCustomEvalRecipients([])}
+                        className="text-[11px] text-red-500 hover:underline font-bold"
+                      >
+                        ล้างทั้งหมด
+                      </button>
+                    </h4>
+                    <div className="space-y-2">
+                      {customEvalRecipients.map(r => (
+                        <div key={r.id} className="flex items-center justify-between p-3 bg-blue-50/50 border border-blue-100 rounded-xl">
+                          <div className="flex flex-col">
+                            <span className="text-sm font-bold text-slate-700">{r.name}</span>
+                            <span className="text-[11px] text-blue-600 font-medium">{r.email}</span>
+                          </div>
+                          <button 
+                            onClick={() => setCustomEvalRecipients(prev => prev.filter(p => p.id !== r.id))}
+                            className="p-1.5 text-slate-400 hover:text-red-500 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Attendees */}
+                <div className="bg-blue-50/30 border border-blue-100 p-4 rounded-2xl">
+                  <div className="flex items-center justify-between mb-3 px-1">
+                    <h4 className="text-sm font-bold text-slate-700">รายชื่อผู้ที่มาอบรมจริง ({evalSelectedIds.length} คน)</h4>
+                    <button 
+                      onClick={() => {
+                        const attendees = registrations.filter(r => r.attended);
+                        if (evalSelectedIds.length === attendees.length) setEvalSelectedIds([]);
+                        else setEvalSelectedIds(attendees.map(a => a.id));
+                      }}
+                      className="text-xs font-bold text-blue-600 hover:text-blue-700 bg-white px-3 py-1 rounded-lg border border-blue-100"
+                    >
+                      {evalSelectedIds.length === registrations.filter(r => r.attended).length ? "ไม่เลือกทั้งหมด" : "เลือกทั้งหมด"}
+                    </button>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                    {registrations.filter(r => r.attended).map(r => {
+                      const isSelected = evalSelectedIds.includes(r.id);
+                      return (
                         <div 
-                          className="flex flex-col flex-1 cursor-pointer" 
+                          key={r.id} 
+                          className={cn(
+                            "flex items-center gap-3 p-3 bg-white rounded-xl border transition-all cursor-pointer",
+                            isSelected ? "border-blue-200 shadow-sm" : "border-slate-100 opacity-70"
+                          )}
                           onClick={() => handleToggleEvalRecipient(r.id)}
                         >
-                          <span className="text-sm font-bold text-slate-700">{formatInstructorName(r.userName)}</span>
-                          <span className="text-[11px] text-slate-500">{r.userEmail}</span>
+                          <input 
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              handleToggleEvalRecipient(r.id);
+                            }}
+                            className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer border-slate-300"
+                          />
+                          <div className="flex flex-col flex-1">
+                            <span className="text-sm font-bold text-slate-700">{formatInstructorName(r.userName)}</span>
+                            <span className="text-[11px] text-slate-500">{r.userEmail}</span>
+                          </div>
                         </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteClick(r.id, r.courseId, r.sessionId || null);
-                          }}
-                          className="p-2 text-slate-200 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                          title="ลบผู้ลงทะเบียน"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                      );
+                    })}
+                    {registrations.filter(r => r.attended).length === 0 && (
+                      <div className="text-sm text-slate-400 text-center py-10 bg-white rounded-xl border border-slate-100 border-dashed">
+                        - ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว -
                       </div>
-                    );
-                  })}
-                  {registrations.filter(r => r.attended).length === 0 && (
-                    <div className="text-sm text-blue-500 text-center py-8 bg-white rounded-xl border border-blue-100 border-dashed">
-                      - ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว -
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1452,16 +1550,17 @@ export const RegistrantsList: React.FC = () => {
             <div className="flex gap-3 pt-4 border-t border-slate-100 mt-auto">
               <button
                 onClick={() => setShowEvalModal(false)}
-                className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors"
+                className="flex-1 py-3.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-2xl transition-colors"
               >
                 ยกเลิก
               </button>
               <button
                 onClick={handleSendEvaluations}
-                disabled={evalSelectedIds.length === 0}
-                className="flex-1 py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-medium rounded-xl transition-colors shadow-md shadow-blue-200"
+                disabled={evalSelectedIds.length === 0 && customEvalRecipients.length === 0}
+                className="flex-[2] py-3.5 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-bold rounded-2xl transition-all shadow-xl shadow-blue-100 flex items-center justify-center gap-2"
               >
-                ยืนยันการส่ง
+                <Send className="w-5 h-5" />
+                ยืนยันการส่ง ({evalSelectedIds.length + customEvalRecipients.length} คน)
               </button>
             </div>
           </div>
