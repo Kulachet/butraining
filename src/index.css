@@ -6,6 +6,9 @@
   --color-crimson-dark: #7f1d1d;
   --color-crimson-light: #fef2f2;
   --font-sans: "Prompt", ui-sans-serif, system-ui, sans-serif;
+  --font-weight-bold: 400;
+  --font-weight-semibold: 400;
+  --font-weight-black: 500;
 }
 
 @layer base {

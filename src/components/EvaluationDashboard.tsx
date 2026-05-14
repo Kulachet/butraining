@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { collection, query, where, getDocs, onSnapshot, orderBy } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { Course } from "../types";
+import { getRatingsArray } from "./analytics/types";
 import { BarChart3, ChevronDown, Download, Users, FileText } from "lucide-react";
 import Papa from "papaparse";
 import toast from "react-hot-toast";
@@ -72,7 +73,7 @@ export const EvaluationDashboard: React.FC = () => {
         "เวลาประเมิน": new Date(evalData.createdAt).toLocaleString('th-TH')
       };
       for (let i = 0; i < 10; i++) {
-        row[`ข้อที่ ${i+1}`] = evalData.ratings?.[i] || "-";
+        row[`ข้อที่ ${i+1}`] = getRatingsArray(evalData.ratings)[i] || "-";
       }
       row["ข้อเสนอแนะ"] = evalData.suggestion || "-";
       return row;
@@ -95,13 +96,14 @@ export const EvaluationDashboard: React.FC = () => {
   // Calculate averages
   const getAverage = (qIndex: number) => {
     if (evaluations.length === 0) return 0;
-    const sum = evaluations.reduce((acc, curr) => acc + (curr.ratings?.[qIndex] || 0), 0);
+    const sum = evaluations.reduce((acc, curr) => acc + (getRatingsArray(curr.ratings)[qIndex] || 0), 0);
     return (sum / evaluations.length).toFixed(2);
   };
   
   const overallAverage = evaluations.length > 0 
     ? (evaluations.reduce((acc, curr) => {
-        const userAvg = QUESTIONS.reduce((s, _, i) => s + (curr.ratings?.[i] || 0), 0) / QUESTIONS.length;
+        const ratingsArray = getRatingsArray(curr.ratings);
+        const userAvg = QUESTIONS.reduce((s, _, i) => s + (ratingsArray[i] || 0), 0) / QUESTIONS.length;
         return acc + userAvg;
       }, 0) / evaluations.length).toFixed(2)
     : 0;

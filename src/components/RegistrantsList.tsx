@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { getRatingsArray } from "./analytics/types";
 import { 
   Search, 
   Filter, 
@@ -419,7 +420,7 @@ export const RegistrantsList: React.FC = () => {
 
       if (!isTest) {
         // Update Firestore status for all selected
-        const updatePromises = selectedRecipients.map(r => 
+        const updatePromises = selectedRecipientsFromRegistrations.map(r => 
           updateDoc(doc(db, "registrations", r.id), {
             certStatus: 'sent',
             certSentAt: new Date().toISOString()
@@ -463,8 +464,9 @@ export const RegistrantsList: React.FC = () => {
           "เวลาประเมิน": new Date(evalData.createdAt).toLocaleString('th-TH')
         };
         // Add ratings
+        const ratingsArray = getRatingsArray(evalData.ratings);
         for (let i = 0; i < 10; i++) {
-          row[`ข้อที่ ${i+1}`] = evalData.ratings?.[i] || "-";
+          row[`ข้อที่ ${i+1}`] = ratingsArray[i] || "-";
         }
         row["ข้อเสนอแนะ"] = evalData.suggestion || "-";
         return row;

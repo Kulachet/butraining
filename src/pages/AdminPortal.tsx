@@ -202,7 +202,7 @@ export const AdminPortal: React.FC = () => {
               {activeTab === "dashboard" && (
                 <>
                   <header className="mb-12">
-                    <h1 className="text-[28px] lg:text-[32px] font-bold text-[#333333] tracking-[0.02em] leading-[1.6]">Dashboard Overview</h1>
+                    <h1 className="text-[28px] lg:text-[32px] font-bold text-[#333333] tracking-[0.02em] leading-[1.6]">Training Analytics Dashboard</h1>
                     <p className="text-[#4A4A4A] font-normal text-[14px] lg:text-[16px] mt-1 tracking-wide leading-[1.7]">ยินดีต้อนรับกลับมา, ผู้ดูแลระบบ</p>
                   </header>
                   <AnalyticsDashboard />
