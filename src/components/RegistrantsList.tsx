@@ -82,6 +82,11 @@ export const RegistrantsList: React.FC = () => {
   const [customEvalRecipients, setCustomEvalRecipients] = useState<{id: string, name: string, email: string}[]>([]);
   const [newCustomEvalName, setNewCustomEvalName] = useState("");
   const [newCustomEvalEmail, setNewCustomEvalEmail] = useState("");
+  const [evalBaseUrl, setEvalBaseUrl] = useState<string>(
+    window.location.origin.includes("run.app") 
+      ? "https://..." 
+      : window.location.origin
+  );
   
   // Reminder states
   const [showReminderModal, setShowReminderModal] = useState(false);
@@ -619,7 +624,8 @@ export const RegistrantsList: React.FC = () => {
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
     // Construct the absolute evaluation URL.
     const encodedTitle = encodeURIComponent(selectedCourse?.title || "");
-    const evalLink = `${window.location.origin}${window.location.pathname.replace(/\/$/, "")}/#/evaluate/${selectedCourseId}?title=${encodedTitle}`;
+    const safeBaseUrl = evalBaseUrl === "https://..." ? "https://ais-pre-sly2upsojdu5nc47xldytg-166049909817.asia-east1.run.app" : evalBaseUrl;
+    const evalLink = `${safeBaseUrl.replace(/\/$/, "")}${window.location.pathname.replace(/\/$/, "")}/#/evaluate/${selectedCourseId}?title=${encodedTitle}`;
 
     const attendeeRecipients = registrations
       .filter(r => evalSelectedIds.includes(r.id))
@@ -1539,6 +1545,25 @@ export const RegistrantsList: React.FC = () => {
             </div>
 
             <div className="flex-1 overflow-y-auto pr-2 mb-6 space-y-6">
+              
+              <div className="bg-amber-50 p-4 rounded-2xl border border-amber-200">
+                <h4 className="text-sm font-bold text-amber-800 mb-2 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4" />
+                  URL ของระบบ (สำหรับลิงก์ในอีเมล)
+                </h4>
+                <p className="text-[11px] text-amber-700 mb-3 leading-relaxed">
+                  หากคุณใช้งานระบบผ่าน AI Studio (URL ลับ) ผู้เข้าอบรมที่คลิกลิงก์จะพบข้อความ Error 403 
+                  กรุณากรอก URL สาธารณะของระบบที่ผู้ใช้งานเข้าถึงได้จริง (เช่น Netlify หรือ Firebase URL)
+                </p>
+                <input 
+                  type="text"
+                  placeholder="https://my-app.netlify.app"
+                  value={evalBaseUrl}
+                  onChange={(e) => setEvalBaseUrl(e.target.value)}
+                  className="w-full px-4 py-2 bg-white border border-amber-200 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none transition-all text-sm font-mono text-slate-600"
+                />
+              </div>
+
               {/* Add Custom Person Section */}
               <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200">
                 <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">

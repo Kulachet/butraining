@@ -83,7 +83,7 @@ export const FeedbackAnalysisTab: React.FC<{ data: AnalyticsData }> = ({ data })
         <div className="relative z-10">
           <h3 className="text-xl font-bold mb-6 flex items-center gap-2 text-yellow-400">
             <Lightbulb className="w-6 h-6 text-amber-400" />
-            Strengths & Improvement Insights (วิเคราะห์อัตโนมัติ)
+            จุดแข็งและข้อเสนอแนะเพื่อการพัฒนา (วิเคราะห์ข้อความอัตโนมัติ)
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-4">
