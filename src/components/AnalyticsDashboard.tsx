@@ -45,7 +45,7 @@ export const AnalyticsDashboard: React.FC = () => {
         ]);
 
         // Fix logic for checking Web application certs
-        const rawRegs = regSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const rawRegs = regSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as any);
         const webCertsCount = rawRegs.filter(r => r.courseId === 'r03dpJJkCEg2hlyIcDBQ' && r.certStatus === 'sent').length;
         if (webCertsCount < 31) {
           try {

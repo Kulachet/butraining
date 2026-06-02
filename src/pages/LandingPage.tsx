@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { collection, getDocs, query, orderBy, where, onSnapshot } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { Course, Session } from "../types";
+import { Course, Session, Registration } from "../types";
 import { useAuth } from "../components/AuthProvider";
 import { CourseCard } from "../components/CourseCard";
 import { InstructorProfile } from "../components/InstructorProfile";
@@ -16,7 +16,7 @@ import { cn, generateGoogleCalendarUrl } from "../lib/utils";
 export const LandingPage: React.FC = () => {
   const navigate = useNavigate();
   const [courses, setCourses] = useState<Course[]>([]);
-  const [userRegistrations, setUserRegistrations] = useState<string[]>([]);
+  const [userRegistrations, setUserRegistrations] = useState<Registration[]>([]);
   const [loading, setLoading] = useState(true);
   const [registering, setRegistering] = useState<string | null>(null);
   const { user, instructor, login, registerInstructor } = useAuth();
@@ -77,8 +77,8 @@ export const LandingPage: React.FC = () => {
     );
     
     const unsubscribeRegs = onSnapshot(regQ, (regSnapshot) => {
-      const registeredCourseIds = regSnapshot.docs.map(doc => doc.data().courseId);
-      setUserRegistrations(registeredCourseIds);
+      const regs = regSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }) as Registration);
+      setUserRegistrations(regs);
     }, (error) => {
       console.error("Error fetching registrations:", error);
     });
@@ -127,7 +127,6 @@ export const LandingPage: React.FC = () => {
     try {
       await RegistrationService.registerForCourse(course, instructor!, session);
       
-      setUserRegistrations(prev => [...prev, course.id]);
       toast.success("ลงทะเบียนสำเร็จ! ระบบกำลังส่งคำเชิญลงปฏิทินของคุณ...");
       
       // Auto-send Calendar Invite via GAS
@@ -184,11 +183,25 @@ export const LandingPage: React.FC = () => {
     setRegistering(courseId);
     try {
       await RegistrationService.cancelRegistration(courseId, instructor.uid);
-      setUserRegistrations(prev => prev.filter(id => id !== courseId));
       toast.success("ยกเลิกการลงทะเบียนเรียบร้อยแล้ว");
       setCourseToCancel(null);
     } catch (error: any) {
       console.error("Cancel error:", error);
+      toast.error(`ยกเลิกไม่สำเร็จ: ${error.message}`);
+    } finally {
+      setRegistering(null);
+    }
+  };
+
+  const handleCancelSession = async (courseId: string, sessionId: string) => {
+    if (!instructor) return;
+    setRegistering(courseId);
+    try {
+      await RegistrationService.cancelRegistration(courseId, instructor.uid, sessionId);
+      toast.success("ยกเลิกการลงทะเบียนเซสชันเรียบร้อยแล้ว");
+      setSelectedCourseForSession(null);
+    } catch (error: any) {
+      console.error("Cancel session error:", error);
       toast.error(`ยกเลิกไม่สำเร็จ: ${error.message}`);
     } finally {
       setRegistering(null);
@@ -316,7 +329,7 @@ export const LandingPage: React.FC = () => {
                       onCancel={setCourseToCancel}
                       onEvaluate={handleEvaluate}
                       isLoading={registering === course.id}
-                      isRegistered={userRegistrations.includes(course.id)}
+                      isRegistered={userRegistrations.some(r => r.courseId === course.id)}
                     />
                   </motion.div>
                 ))
@@ -404,53 +417,86 @@ export const LandingPage: React.FC = () => {
               </div>
 
               <div className="space-y-4 mb-8">
-                {selectedCourseForSession.sessions.map((session) => (
-                  <button
-                    key={session.sessionId}
-                    onClick={() => setSelectedSessionId(session.sessionId)}
-                    className={cn(
-                      "w-full p-5 rounded-2xl border-2 text-left transition-all flex items-center justify-between group",
-                      selectedSessionId === session.sessionId 
-                        ? "border-crimson bg-crimson/5 ring-4 ring-crimson/10" 
-                        : "border-slate-100 hover:border-slate-200 bg-slate-50"
-                    )}
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className={cn(
-                        "w-12 h-12 rounded-xl flex items-center justify-center transition-colors",
-                        selectedSessionId === session.sessionId ? "bg-crimson text-white" : "bg-white text-slate-400"
-                      )}>
-                        <Clock className="w-6 h-6" />
-                      </div>
-                      <div>
-                        <div className="font-black text-slate-900">{session.sessionName}</div>
-                        <div className="text-sm text-slate-500 font-medium flex items-center gap-3 mt-1">
-                          <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {session.startTime} - {session.endTime}</span>
-                          <span className="flex items-center gap-1"><MapPin className="w-3 h-3" /> {session.locationDetail}</span>
+                {selectedCourseForSession.sessions.map((session) => {
+                  const isRegisteredThisSession = userRegistrations.some(
+                    r => r.courseId === selectedCourseForSession.id && r.sessionId === session.sessionId
+                  );
+                  return (
+                    <button
+                      key={session.sessionId}
+                      onClick={() => setSelectedSessionId(session.sessionId)}
+                      className={cn(
+                        "w-full p-5 rounded-2xl border-2 text-left transition-all flex items-center justify-between group",
+                        selectedSessionId === session.sessionId 
+                          ? "border-crimson bg-crimson/5 ring-4 ring-crimson/10" 
+                          : "border-slate-100 hover:border-slate-200 bg-slate-50",
+                        isRegisteredThisSession && "border-green-100 bg-green-50/10"
+                      )}
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className={cn(
+                          "w-12 h-12 rounded-xl flex items-center justify-center transition-colors",
+                          selectedSessionId === session.sessionId 
+                            ? "bg-crimson text-white" 
+                            : isRegisteredThisSession
+                              ? "bg-green-600 text-white"
+                              : "bg-white text-slate-400"
+                        )}>
+                          <Clock className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <div className="font-black text-slate-900 flex items-center gap-2">
+                            {session.sessionName}
+                            {isRegisteredThisSession && (
+                              <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
+                                ลงทะเบียนแล้ว
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-sm text-slate-500 font-medium flex items-center gap-3 mt-1">
+                            <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {session.startTime} - {session.endTime}</span>
+                            <span className="flex items-center gap-1"><MapPin className="w-3 h-3" /> {session.locationDetail}</span>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    {selectedSessionId === session.sessionId && (
-                      <CheckCircle2 className="w-6 h-6 text-crimson" />
-                    )}
-                  </button>
-                ))}
+                      {selectedSessionId === session.sessionId && (
+                        <CheckCircle2 className={cn("w-6 h-6", isRegisteredThisSession ? "text-green-600" : "text-crimson")} />
+                      )}
+                    </button>
+                  );
+                })}
               </div>
 
-              <button
-                onClick={() => {
-                  const session = selectedCourseForSession.sessions.find(s => s.sessionId === selectedSessionId);
-                  handleFinalRegister(selectedCourseForSession, session);
-                }}
-                disabled={!selectedSessionId || registering === selectedCourseForSession.id}
-                className="w-full bg-crimson hover:bg-crimson-dark text-white font-medium py-4 rounded-2xl shadow-xl shadow-crimson/10 transition-all flex items-center justify-center gap-2 disabled:opacity-50 tracking-wide"
-              >
-                {registering === selectedCourseForSession.id ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <>ยืนยันการลงทะเบียน</>
-                )}
-              </button>
+              {(() => {
+                const isSelectedReg = userRegistrations.some(
+                  r => r.courseId === selectedCourseForSession.id && r.sessionId === selectedSessionId
+                );
+                return (
+                  <button
+                    onClick={() => {
+                      const session = selectedCourseForSession.sessions.find(s => s.sessionId === selectedSessionId);
+                      if (isSelectedReg) {
+                        handleCancelSession(selectedCourseForSession.id, selectedSessionId!);
+                      } else {
+                        handleFinalRegister(selectedCourseForSession, session);
+                      }
+                    }}
+                    disabled={!selectedSessionId || registering === selectedCourseForSession.id}
+                    className={cn(
+                      "w-full font-medium py-4 rounded-2xl shadow-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 tracking-wide",
+                      isSelectedReg
+                        ? "bg-white hover:bg-red-50 text-red-500 border border-red-200 shadow-sm"
+                        : "bg-crimson hover:bg-crimson-dark text-white shadow-crimson/10"
+                    )}
+                  >
+                    {registering === selectedCourseForSession.id ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <>{isSelectedReg ? "ยกเลิกการลงทะเบียนเซสชันนี้" : "ยืนยันการลงทะเบียน"}</>
+                    )}
+                  </button>
+                );
+              })()}
             </motion.div>
           </div>
         )}

@@ -18,12 +18,13 @@ import { Registration, Course, Instructor, Session } from "../types";
 export const RegistrationService = {
   async registerForCourse(course: Course, instructor: Instructor, session?: Session) {
     const courseRef = doc(db, "courses", course.id);
-    const regRef = doc(db, "registrations", `${course.id}_${instructor.uid}`);
+    const regId = `${course.id}_${session?.sessionId || "default"}_${instructor.uid}`;
+    const regRef = doc(db, "registrations", regId);
     
     return await runTransaction(db, async (transaction) => {
-      // 1. Check if already registered
+      // 1. Check if already registered for this session
       const regDoc = await transaction.get(regRef);
-      if (regDoc.exists()) throw new Error("Already registered for this course");
+      if (regDoc.exists()) throw new Error("Already registered for this session of the course");
 
       // 2. Get current course data to check seats and get sequence number
       const courseDoc = await transaction.get(courseRef);
@@ -85,13 +86,31 @@ export const RegistrationService = {
     });
   },
 
-  async cancelRegistration(courseId: string, userId: string) {
+  async cancelRegistration(courseId: string, userId: string, sessionId?: string) {
     const courseRef = doc(db, "courses", courseId);
-    const regRef = doc(db, "registrations", `${courseId}_${userId}`);
 
     return await runTransaction(db, async (transaction) => {
-      // 1. Check if registration exists
-      const regDoc = await transaction.get(regRef);
+      // 1. Try to find registration doc using session ID or legacy ID
+      let regRef = null;
+      let regDoc = null;
+
+      if (sessionId) {
+        regRef = doc(db, "registrations", `${courseId}_${sessionId}_${userId}`);
+        regDoc = await transaction.get(regRef);
+      }
+
+      if (!regDoc || !regDoc.exists()) {
+        // Try direct courseId + userId as legacy fallback
+        regRef = doc(db, "registrations", `${courseId}_${userId}`);
+        regDoc = await transaction.get(regRef);
+      }
+
+      if (!regDoc || !regDoc.exists()) {
+        // Try fallback default session ID
+        regRef = doc(db, "registrations", `${courseId}_default_${userId}`);
+        regDoc = await transaction.get(regRef);
+      }
+
       if (!regDoc.exists()) throw new Error("ไม่พบข้อมูลการลงทะเบียน");
       const regData = regDoc.data() as Registration;
 

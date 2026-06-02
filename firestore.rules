@@ -59,8 +59,8 @@ service cloud.firestore {
 
     match /courses/{courseId} {
       allow read: if true;
-      // แก้ไข: อนุญาตให้ User ทั่วไปสามารถอัปเดตได้ "เฉพาะ" ฟิลด์จำนวนที่นั่ง (sessions, totalRegistrations) เท่านั้น
-      allow update: if isAdmin() || (isAuthenticated() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sessions', 'totalRegistrations']));
+      // แก้ไข: อนุญาตให้ User ทั่วไปสามารถอัปเดตได้ "เฉพาะ" ฟิลด์จำนวนที่นั่ง (sessions, totalRegistrations, enrolledSeats) เท่านั้น
+      allow update: if isAdmin() || (isAuthenticated() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sessions', 'totalRegistrations', 'enrolledSeats']));
       allow create, delete: if isAdmin();
     }
 
