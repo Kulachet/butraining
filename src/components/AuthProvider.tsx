@@ -99,12 +99,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setIsAdmin(false);
         } else {
           setUser(currentUser);
-          console.log("Logged in as:", currentUser.email);
           await checkInstructor(currentUser.email, currentUser.uid, currentUser.displayName);
-          // Check admin status (simple check for now)
-          const adminEmail = "kulachet.l@bu.ac.th";
-          const isUserAdmin = currentUser.email?.toLowerCase() === adminEmail.toLowerCase();
+
+          const adminEmails = [
+            "kulachet.l@bu.ac.th",
+            "napaporn.pu@bu.ac.th",
+          ];
+
+          const userEmail =
+            currentUser.email?.trim().toLowerCase() || "";
+
+          const isUserAdmin =
+            adminEmails.some(
+              email => email.toLowerCase() === userEmail
+            );
+
+          console.log("Logged in as:", currentUser.email);
           console.log("Is Admin:", isUserAdmin);
+
           setIsAdmin(isUserAdmin);
         }
       } else {

@@ -24,11 +24,11 @@ export const Navbar: React.FC = () => {
             </div>
           </Link>
 
-          <div className="hidden md:flex items-center gap-8">
+          <div className="flex items-center gap-4 md:gap-8">
             {isAdmin && (
-              <Link to="/admin" className="flex items-center gap-1.5 text-sm font-medium text-crimson hover:text-crimson-dark transition-colors tracking-wide">
+              <Link to="/admin" className="flex items-center gap-1.5 text-xs sm:text-sm font-medium text-crimson hover:text-crimson-dark transition-colors tracking-wide bg-crimson/5 border border-crimson/20 px-3 py-1.5 rounded-lg shadow-sm">
                 <ShieldCheck className="w-4 h-4" />
-                Admin Portal
+                <span>Admin Portal</span>
               </Link>
             )}
           </div>

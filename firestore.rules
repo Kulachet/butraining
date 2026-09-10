@@ -25,7 +25,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && 
-             request.auth.token.email.lower() == "kulachet.l@bu.ac.th" &&
+             (request.auth.token.email.lower() == "kulachet.l@bu.ac.th" || request.auth.token.email.lower() == "napaporn.pu@bu.ac.th") &&
              request.auth.token.email_verified == true;
     }
 
