@@ -35,6 +35,7 @@ const AppContent = () => {
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/admin" element={<AdminPortal />} />
+          <Route path="/admin/history" element={<AdminPortal defaultTab="history" />} />
           <Route path="/admin/course/new" element={<CourseEditorPage />} />
           <Route path="/admin/course/edit/:id" element={<CourseEditorPage />} />
           <Route path="/profile" element={<ProfilePage />} />

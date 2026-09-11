@@ -50,8 +50,13 @@ export const ApplicantList: React.FC<Props> = ({ course }) => {
         id: doc.id,
         ...doc.data()
       })) as Registration[];
-      // Sort by sequenceNumber in frontend
-      regs.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
+      // Sort by sequenceNumber in frontend, fallback to registeredAt
+      regs.sort((a, b) => {
+        const seqA = a.sequenceNumber || 0;
+        const seqB = b.sequenceNumber || 0;
+        if (seqA !== seqB) return seqA - seqB;
+        return new Date(a.registeredAt || 0).getTime() - new Date(b.registeredAt || 0).getTime();
+      });
       setRegistrations(regs);
       setLoading(false);
     }, (error) => {
@@ -91,8 +96,8 @@ export const ApplicantList: React.FC<Props> = ({ course }) => {
 
   const exportCSV = () => {
     const headers = ["No.", "Instructor ID", "Name", "Position", "Department", "Email", "Session", "Status"];
-    const rows = registrations.map(r => [
-      r.sequenceNumber,
+    const rows = registrations.map((r, index) => [
+      index + 1,
       r.instructorId || instructorMap[r.userEmail] || "-",
       formatInstructorName(r.userName),
       r.userPosition,
@@ -153,9 +158,11 @@ export const ApplicantList: React.FC<Props> = ({ course }) => {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {registrations.map((reg) => (
+            {registrations.map((reg, index) => (
               <tr key={reg.id} className="hover:bg-slate-50 transition-colors">
-                <td className="px-6 py-4 font-bold text-slate-300">{reg.sequenceNumber}</td>
+                <td className="px-6 py-4 font-bold text-slate-300">
+                  {String(index + 1).padStart(2, '0')}
+                </td>
                 <td className="px-6 py-4">
                   <span className="text-[12px] lg:text-[13px] font-mono font-medium text-slate-400">
                     {reg.instructorId || instructorMap[reg.userEmail] || "-"}

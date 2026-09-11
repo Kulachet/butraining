@@ -35,6 +35,10 @@ export interface Course {
   driveFolderId?: string;
   status: 'Active' | 'Inactive';
   isVisible: boolean;
+  archived?: boolean;
+  archivedAt?: any;
+  archivedBy?: string;
+  archivedByEmail?: string;
   sessions: Session[];
   totalRegistrations?: number;
   maxSeats?: number;

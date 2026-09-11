@@ -11,6 +11,7 @@ import { InstructorList } from "../components/InstructorList";
 import { RegistrantsList } from "../components/RegistrantsList";
 import { EvaluationDashboard } from "../components/EvaluationDashboard";
 import { EvaluationSettings } from "../components/EvaluationSettings";
+import { TrainingHistory } from "../components/TrainingHistory";
 import { 
   Plus, 
   LayoutDashboard, 
@@ -28,19 +29,35 @@ import {
   Filter,
   FileText,
   BarChart3,
-  UserCheck
+  UserCheck,
+  History
 } from "lucide-react";
 import toast from "react-hot-toast";
 
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../components/AuthProvider";
 
-export const AdminPortal: React.FC = () => {
+interface AdminPortalProps {
+  defaultTab?: string;
+}
+
+export const AdminPortal: React.FC<AdminPortalProps> = ({ defaultTab }) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { isAdmin, loading: authLoading } = useAuth();
   const [activeTab, setActiveTab] = useState(() => {
+    if (defaultTab) return defaultTab;
+    const searchParams = new URLSearchParams(window.location.search);
+    const tabParam = searchParams.get("tab");
+    if (tabParam) return tabParam;
     return sessionStorage.getItem("adminActiveTab") || "dashboard";
   });
+
+  useEffect(() => {
+    if (defaultTab) {
+      setActiveTab(defaultTab);
+    }
+  }, [defaultTab]);
 
   useEffect(() => {
     sessionStorage.setItem("adminActiveTab", activeTab);
@@ -110,6 +127,13 @@ export const AdminPortal: React.FC = () => {
             >
               <BookOpen className="w-5 h-5" />
               จัดการหลักสูตร
+            </button>
+            <button 
+              onClick={() => { setActiveTab("history"); setViewingApplicants(null); }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "history" ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+            >
+              <History className="w-5 h-5" />
+              ประวัติการจัดการอบรม
             </button>
             <button 
               onClick={() => { setActiveTab("instructors"); setViewingApplicants(null); }}
@@ -213,6 +237,12 @@ export const AdminPortal: React.FC = () => {
                 <ManageCourses 
                   onCreateCourse={() => navigate("/admin/course/new")}
                   onEditCourse={(course) => navigate(`/admin/course/edit/${course.id}`)}
+                  onViewApplicants={(course) => setViewingApplicants(course)}
+                />
+              )}
+
+              {activeTab === "history" && (
+                <TrainingHistory 
                   onViewApplicants={(course) => setViewingApplicants(course)}
                 />
               )}

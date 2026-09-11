@@ -13,6 +13,14 @@ import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { cn, generateGoogleCalendarUrl } from "../lib/utils";
 
+interface CancelTarget {
+  courseId: string;
+  courseTitle?: string;
+  sessionId?: string;
+  sessionName?: string;
+  registrationId?: string;
+}
+
 export const LandingPage: React.FC = () => {
   const navigate = useNavigate();
   const [courses, setCourses] = useState<Course[]>([]);
@@ -21,7 +29,7 @@ export const LandingPage: React.FC = () => {
   const [registering, setRegistering] = useState<string | null>(null);
   const { user, instructor, login, registerInstructor } = useAuth();
   const [showModal, setShowModal] = useState(false);
-  const [courseToCancel, setCourseToCancel] = useState<string | null>(null);
+  const [courseToCancel, setCourseToCancel] = useState<CancelTarget | null>(null);
   
   // Search and Filter State
   const [searchQuery, setSearchQuery] = useState("");
@@ -44,7 +52,7 @@ export const LandingPage: React.FC = () => {
           id: doc.id,
           ...doc.data()
         }))
-        .filter((course: any) => course.isVisible !== false)
+        .filter((course: any) => course.isVisible !== false && !course.archived)
         .sort((a: any, b: any) => {
           const dateA = new Date(a.date).getTime();
           const dateB = new Date(b.date).getTime();
@@ -178,31 +186,74 @@ export const LandingPage: React.FC = () => {
     }
   };
 
-  const handleConfirmCancel = async (courseId: string) => {
-    if (!instructor) return;
-    setRegistering(courseId);
+  const handleOpenCancelModal = (courseId: string, sessionId?: string) => {
+    const course = courses.find(c => c.id === courseId);
+    const matchingReg = userRegistrations.find(r => 
+      r.courseId === courseId && (!sessionId || r.sessionId === sessionId)
+    );
+
+    const actualSessionId = sessionId || matchingReg?.sessionId || course?.sessions?.[0]?.sessionId;
+    const actualSessionName = matchingReg?.sessionName || 
+      course?.sessions?.find(s => s.sessionId === actualSessionId)?.sessionName;
+
+    setCourseToCancel({
+      courseId,
+      sessionId: actualSessionId,
+      courseTitle: course?.title || matchingReg?.courseTitle || "หลักสูตร",
+      sessionName: actualSessionName,
+      registrationId: matchingReg?.id,
+    });
+  };
+
+  const handleConfirmCancel = async (target: CancelTarget) => {
+    const currentUserId = user?.uid || instructor?.uid;
+    if (!currentUserId) {
+      toast.error("กรุณาเข้าสู่ระบบก่อนทำรายการ");
+      return;
+    }
+    setRegistering(target.courseId);
     try {
-      await RegistrationService.cancelRegistration(courseId, instructor.uid);
+      await RegistrationService.cancelRegistration(
+        target.courseId, 
+        currentUserId, 
+        target.sessionId, 
+        target.registrationId
+      );
       toast.success("ยกเลิกการลงทะเบียนเรียบร้อยแล้ว");
       setCourseToCancel(null);
     } catch (error: any) {
       console.error("Cancel error:", error);
-      toast.error(`ยกเลิกไม่สำเร็จ: ${error.message}`);
+      const msg = error?.message || "";
+      if (msg.includes("ไม่พบข้อมูลการลงทะเบียน")) {
+        toast.error("ไม่พบข้อมูลการลงทะเบียน กรุณารีเฟรชหน้าแล้วลองอีกครั้ง");
+      } else {
+        toast.error(`ยกเลิกไม่สำเร็จ: ${msg || "กรุณาลองใหม่อีกครั้ง"}`);
+      }
     } finally {
       setRegistering(null);
     }
   };
 
   const handleCancelSession = async (courseId: string, sessionId: string) => {
-    if (!instructor) return;
+    const currentUserId = user?.uid || instructor?.uid;
+    if (!currentUserId) {
+      toast.error("กรุณาเข้าสู่ระบบก่อนทำรายการ");
+      return;
+    }
     setRegistering(courseId);
     try {
-      await RegistrationService.cancelRegistration(courseId, instructor.uid, sessionId);
-      toast.success("ยกเลิกการลงทะเบียนเซสชันเรียบร้อยแล้ว");
+      const matchingReg = userRegistrations.find(r => r.courseId === courseId && r.sessionId === sessionId);
+      await RegistrationService.cancelRegistration(courseId, currentUserId, sessionId, matchingReg?.id);
+      toast.success("ยกเลิกการลงทะเบียนเรียบร้อยแล้ว");
       setSelectedCourseForSession(null);
     } catch (error: any) {
       console.error("Cancel session error:", error);
-      toast.error(`ยกเลิกไม่สำเร็จ: ${error.message}`);
+      const msg = error?.message || "";
+      if (msg.includes("ไม่พบข้อมูลการลงทะเบียน")) {
+        toast.error("ไม่พบข้อมูลการลงทะเบียน กรุณารีเฟรชหน้าแล้วลองอีกครั้ง");
+      } else {
+        toast.error(`ยกเลิกไม่สำเร็จ: ${msg || "กรุณาลองใหม่อีกครั้ง"}`);
+      }
     } finally {
       setRegistering(null);
     }
@@ -326,7 +377,7 @@ export const LandingPage: React.FC = () => {
                     <CourseCard 
                       course={course} 
                       onRegister={handleRegisterClick} 
-                      onCancel={setCourseToCancel}
+                      onCancel={handleOpenCancelModal}
                       onEvaluate={handleEvaluate}
                       isLoading={registering === course.id}
                       isRegistered={userRegistrations.some(r => r.courseId === course.id)}
@@ -358,23 +409,35 @@ export const LandingPage: React.FC = () => {
                 <AlertCircle className="w-8 h-8" />
               </div>
               <h3 className="text-2xl font-bold text-center text-slate-800 mb-2">ยืนยันการยกเลิก</h3>
-              <p className="text-center text-slate-500 mb-8">
+              {courseToCancel.courseTitle && (
+                <p className="text-center font-medium text-slate-700 mb-1 px-4 truncate">
+                  {courseToCancel.courseTitle}
+                </p>
+              )}
+              {courseToCancel.sessionName && (
+                <p className="text-center text-xs text-crimson font-medium mb-3">
+                  เซสชัน: {courseToCancel.sessionName}
+                </p>
+              )}
+              <p className="text-center text-slate-500 mb-8 text-sm">
                 คุณต้องการยกเลิกการลงทะเบียนหลักสูตรนี้ใช่หรือไม่? ที่นั่งของคุณจะถูกคืนเข้าสู่ระบบ
               </p>
               <div className="flex gap-3">
                 <button
+                  type="button"
                   onClick={() => setCourseToCancel(null)}
-                  className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors"
-                  disabled={registering === courseToCancel}
+                  className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors disabled:opacity-50"
+                  disabled={registering === courseToCancel.courseId}
                 >
                   ย้อนกลับ
                 </button>
                 <button
+                  type="button"
                   onClick={() => handleConfirmCancel(courseToCancel)}
-                  className="flex-1 py-3 px-4 bg-red-500 hover:bg-red-600 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
-                  disabled={registering === courseToCancel}
+                  className="flex-1 py-3 px-4 bg-red-500 hover:bg-red-600 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                  disabled={registering === courseToCancel.courseId}
                 >
-                  {registering === courseToCancel ? (
+                  {registering === courseToCancel.courseId ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
                     "ยืนยันการยกเลิก"
@@ -476,7 +539,8 @@ export const LandingPage: React.FC = () => {
                     onClick={() => {
                       const session = selectedCourseForSession.sessions.find(s => s.sessionId === selectedSessionId);
                       if (isSelectedReg) {
-                        handleCancelSession(selectedCourseForSession.id, selectedSessionId!);
+                        handleOpenCancelModal(selectedCourseForSession.id, selectedSessionId!);
+                        setSelectedCourseForSession(null);
                       } else {
                         handleFinalRegister(selectedCourseForSession, session);
                       }

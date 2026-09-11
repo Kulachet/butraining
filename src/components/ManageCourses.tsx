@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { collection, getDocs, query, orderBy, deleteDoc, doc, updateDoc, where, onSnapshot, getDoc } from "firebase/firestore";
+import { collection, getDocs, query, orderBy, deleteDoc, doc, updateDoc, where, onSnapshot, serverTimestamp } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { Course, Instructor } from "../types";
 import { motion, AnimatePresence } from "motion/react";
@@ -17,10 +17,12 @@ import {
   ArrowUpDown,
   Loader2,
   BookOpen,
-  RefreshCw
+  RefreshCw,
+  Archive
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { cn, formatInstructorName } from "../lib/utils";
+import { useAuth } from "./AuthProvider";
 
 interface Props {
   onCreateCourse: () => void;
@@ -29,9 +31,11 @@ interface Props {
 }
 
 export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, onViewApplicants }) => {
+  const { user, isAdmin } = useAuth();
   const [courses, setCourses] = useState<Course[]>([]);
   const [instructors, setInstructors] = useState<Instructor[]>([]);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
   
   // Filters State
   const [search, setSearch] = useState("");
@@ -72,19 +76,24 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
     return Array.from(depts).filter(Boolean);
   }, [instructors]);
 
-  const uniqueInstructors = useMemo(() => {
-    const names = new Set(courses.map(c => c.instructorName));
-    return Array.from(names).filter(Boolean).sort();
+  // Active courses: not archived (or archived === false / undefined)
+  const activeCourses = useMemo(() => {
+    return courses.filter(c => !c.archived);
   }, [courses]);
 
+  const uniqueInstructors = useMemo(() => {
+    const names = new Set(activeCourses.map(c => c.instructorName));
+    return Array.from(names).filter(Boolean).sort();
+  }, [activeCourses]);
+
   const filteredCourses = useMemo(() => {
-    let result = [...courses];
+    let result = [...activeCourses];
 
     // Search
     if (search) {
       result = result.filter(c => 
-        c.title.toLowerCase().includes(search.toLowerCase()) ||
-        c.instructorName.toLowerCase().includes(search.toLowerCase())
+        (c.title || "").toLowerCase().includes(search.toLowerCase()) ||
+        (c.instructorName || "").toLowerCase().includes(search.toLowerCase())
       );
     }
 
@@ -113,9 +122,9 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
 
     // Sort
     if (sortBy === "Title A-Z") {
-      result.sort((a, b) => a.title.localeCompare(b.title));
+      result.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
     } else if (sortBy === "Title Z-A") {
-      result.sort((a, b) => b.title.localeCompare(a.title));
+      result.sort((a, b) => (b.title || "").localeCompare(a.title || ""));
     } else if (sortBy === "Training Date (Earliest)") {
       result.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     } else if (sortBy === "Training Date (Latest)") {
@@ -126,20 +135,61 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
     }
 
     return result;
-  }, [courses, search, statusFilter, instructorFilter, startDate, endDate, deptFilter, sortBy]);
+  }, [activeCourses, search, statusFilter, instructorFilter, startDate, endDate, deptFilter, sortBy]);
 
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
     title: string;
     message: string;
+    confirmText?: string;
+    confirmButtonClass?: string;
     onConfirm: () => void;
   } | null>(null);
+
+  const handleArchiveClick = (course: Course) => {
+    if (!isAdmin) {
+      toast.error("คุณไม่มีสิทธิ์ดำเนินการนี้");
+      return;
+    }
+    if (course.archived) {
+      toast.error("หลักสูตรนี้อยู่ในประวัติแล้ว");
+      return;
+    }
+
+    setConfirmModal({
+      isOpen: true,
+      title: "เก็บหลักสูตรเข้าประวัติ?",
+      message: "หลักสูตรนี้จะถูกซ่อนจากรายการจัดการหลักสูตร แต่ข้อมูลการสมัคร การเข้าอบรม และผลการประเมินจะยังคงอยู่",
+      confirmText: "เก็บเข้าประวัติ",
+      confirmButtonClass: "text-white bg-slate-800 hover:bg-slate-900 shadow-slate-800/20",
+      onConfirm: async () => {
+        setActionLoading(course.id);
+        setConfirmModal(null);
+        try {
+          await updateDoc(doc(db, "courses", course.id), {
+            archived: true,
+            archivedAt: serverTimestamp(),
+            archivedBy: user?.uid || "",
+            archivedByEmail: user?.email || "",
+          });
+          toast.success("เก็บหลักสูตรเข้าประวัติเรียบร้อยแล้ว");
+        } catch (error: any) {
+          console.error("Archive error:", error);
+          toast.error(`เกิดข้อผิดพลาดในการเก็บเข้าประวัติ: ${error.message || "กรุณาลองใหม่อีกครั้ง"}`);
+        } finally {
+          setActionLoading(null);
+        }
+      }
+    });
+  };
 
   const handleDeleteClick = (id: string) => {
     setConfirmModal({
       isOpen: true,
       title: "ยืนยันการลบหลักสูตร",
       message: "คุณแน่ใจหรือไม่ว่าต้องการลบหลักสูตรนี้? การกระทำนี้ไม่สามารถย้อนกลับได้",
+      confirmText: "ยืนยันลบ",
+      confirmButtonClass: "text-white bg-crimson hover:bg-crimson-dark shadow-crimson/20",
       onConfirm: async () => {
         setConfirmModal(null);
         try {
@@ -457,6 +507,19 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
                   Edit Course
                 </button>
                 <button 
+                  onClick={() => handleArchiveClick(course)}
+                  disabled={actionLoading === course.id}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 hover:border-slate-400 hover:bg-slate-50 text-slate-600 rounded-xl text-[14px] lg:text-[16px] font-medium transition-all tracking-wide leading-[1.7] disabled:opacity-50"
+                  title="เก็บหลักสูตรเข้าประวัติ"
+                >
+                  {actionLoading === course.id ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-slate-500" />
+                  ) : (
+                    <Archive className="w-4 h-4 text-slate-500" />
+                  )}
+                  เก็บเข้าประวัติ
+                </button>
+                <button 
                   onClick={() => handleDeleteClick(course.id)}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-50 hover:border-red-500 hover:text-red-500 text-red-400 rounded-xl text-[14px] lg:text-[16px] font-medium transition-all tracking-wide leading-[1.7]"
                 >
@@ -467,10 +530,20 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
             </motion.div>
           ))}
 
-          {filteredCourses.length === 0 && (
+          {activeCourses.length === 0 && (
             <div className="bg-white py-20 rounded-3xl border border-dashed border-slate-200 text-center">
-              <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                <Search className="w-10 h-10 text-slate-200" />
+              <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300">
+                <BookOpen className="w-10 h-10" />
+              </div>
+              <p className="text-slate-500 font-bold text-lg">ไม่พบหลักสูตรที่กำลังใช้งาน</p>
+              <p className="text-slate-400 text-sm mt-1">กดปุ่ม "Create Training Course" ด้านบน เพื่อสร้างหลักสูตรใหม่</p>
+            </div>
+          )}
+
+          {activeCourses.length > 0 && filteredCourses.length === 0 && (
+            <div className="bg-white py-20 rounded-3xl border border-dashed border-slate-200 text-center">
+              <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300">
+                <Search className="w-10 h-10" />
               </div>
               <p className="text-slate-400 font-bold">ไม่พบหลักสูตรที่ตรงตามเงื่อนไข</p>
             </div>
@@ -494,16 +567,24 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
               
               <div className="flex items-center justify-end gap-3">
                 <button
+                  type="button"
+                  disabled={actionLoading !== null}
                   onClick={() => setConfirmModal(null)}
-                  className="px-6 py-2.5 rounded-xl font-medium text-slate-600 hover:bg-slate-100 transition-colors"
+                  className="px-6 py-2.5 rounded-xl font-medium text-slate-600 hover:bg-slate-100 transition-colors disabled:opacity-50"
                 >
                   ยกเลิก
                 </button>
                 <button
+                  type="button"
+                  disabled={actionLoading !== null}
                   onClick={confirmModal.onConfirm}
-                  className="px-6 py-2.5 rounded-xl font-medium text-white bg-crimson hover:bg-crimson-dark shadow-lg shadow-crimson/20 transition-all"
+                  className={cn(
+                    "px-6 py-2.5 rounded-xl font-medium transition-all shadow-lg flex items-center gap-2 disabled:opacity-50",
+                    confirmModal.confirmButtonClass || "text-white bg-crimson hover:bg-crimson-dark shadow-crimson/20"
+                  )}
                 >
-                  ยืนยัน
+                  {actionLoading !== null && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {confirmModal.confirmText || "ยืนยัน"}
                 </button>
               </div>
             </motion.div>

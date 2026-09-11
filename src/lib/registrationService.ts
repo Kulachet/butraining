@@ -86,40 +86,129 @@ export const RegistrationService = {
     });
   },
 
-  async cancelRegistration(courseId: string, userId: string, sessionId?: string) {
+  async cancelRegistration(courseId: string, userId: string, sessionId?: string, registrationId?: string) {
+    if (!userId) {
+      throw new Error("กรุณาเข้าสู่ระบบก่อนทำรายการ");
+    }
+    if (!courseId) {
+      throw new Error("ไม่พบข้อมูลหลักสูตร");
+    }
+
     const courseRef = doc(db, "courses", courseId);
 
+    // Step 1: Locate the registration DocumentReference
+    let regRef = null;
+
+    // Strategy A: If registrationId was provided directly
+    if (registrationId) {
+      const directRef = doc(db, "registrations", registrationId);
+      const directSnap = await getDoc(directRef);
+      if (directSnap.exists()) {
+        const data = directSnap.data();
+        if (data.userId === userId && data.courseId === courseId) {
+          regRef = directRef;
+        }
+      }
+    }
+
+    // Strategy B: Deterministic ID with provided sessionId
+    if (!regRef && sessionId) {
+      const sessionRef = doc(db, "registrations", `${courseId}_${sessionId}_${userId}`);
+      const sessionSnap = await getDoc(sessionRef);
+      if (sessionSnap.exists()) {
+        regRef = sessionRef;
+      }
+    }
+
+    // Strategy C: Deterministic ID with "default" session
+    if (!regRef) {
+      const defaultRef = doc(db, "registrations", `${courseId}_default_${userId}`);
+      const defaultSnap = await getDoc(defaultRef);
+      if (defaultSnap.exists()) {
+        regRef = defaultRef;
+      }
+    }
+
+    // Strategy D: Deterministic ID legacy (courseId_userId)
+    if (!regRef) {
+      const legacyRef = doc(db, "registrations", `${courseId}_${userId}`);
+      const legacySnap = await getDoc(legacyRef);
+      if (legacySnap.exists()) {
+        regRef = legacyRef;
+      }
+    }
+
+    // Strategy E: Check course's sessions if course has sessions and sessionId was omitted
+    if (!regRef) {
+      const courseSnap = await getDoc(courseRef);
+      if (courseSnap.exists()) {
+        const courseData = courseSnap.data() as Course;
+        if (courseData.sessions && courseData.sessions.length > 0) {
+          for (const s of courseData.sessions) {
+            const sRef = doc(db, "registrations", `${courseId}_${s.sessionId}_${userId}`);
+            const sSnap = await getDoc(sRef);
+            if (sSnap.exists()) {
+              regRef = sRef;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Strategy F: Targeted Firestore query with minimum necessary filters (NO full collection scan)
+    if (!regRef) {
+      const q = sessionId
+        ? query(
+            collection(db, "registrations"),
+            where("courseId", "==", courseId),
+            where("userId", "==", userId),
+            where("sessionId", "==", sessionId),
+            limit(1)
+          )
+        : query(
+            collection(db, "registrations"),
+            where("courseId", "==", courseId),
+            where("userId", "==", userId),
+            limit(1)
+          );
+      const querySnap = await getDocs(q);
+      if (!querySnap.empty) {
+        regRef = querySnap.docs[0].ref;
+      }
+    }
+
+    if (!regRef) {
+      throw new Error("ไม่พบข้อมูลการลงทะเบียน กรุณารีเฟรชหน้าแล้วลองอีกครั้ง");
+    }
+
+    // Step 2: Atomic Transaction to delete registration and update course seat counts
     return await runTransaction(db, async (transaction) => {
-      // 1. Try to find registration doc using session ID or legacy ID
-      let regRef = null;
-      let regDoc = null;
-
-      if (sessionId) {
-        regRef = doc(db, "registrations", `${courseId}_${sessionId}_${userId}`);
-        regDoc = await transaction.get(regRef);
+      const regDoc = await transaction.get(regRef!);
+      if (!regDoc.exists()) {
+        throw new Error("ไม่พบข้อมูลการลงทะเบียน กรุณารีเฟรชหน้าแล้วลองอีกครั้ง");
       }
-
-      if (!regDoc || !regDoc.exists()) {
-        // Try direct courseId + userId as legacy fallback
-        regRef = doc(db, "registrations", `${courseId}_${userId}`);
-        regDoc = await transaction.get(regRef);
-      }
-
-      if (!regDoc || !regDoc.exists()) {
-        // Try fallback default session ID
-        regRef = doc(db, "registrations", `${courseId}_default_${userId}`);
-        regDoc = await transaction.get(regRef);
-      }
-
-      if (!regDoc.exists()) throw new Error("ไม่พบข้อมูลการลงทะเบียน");
       const regData = regDoc.data() as Registration;
 
-      // 2. Get current course data
+      // Ownership and identifiers verification
+      if (regData.userId !== userId) {
+        throw new Error("คุณไม่มีสิทธิ์ยกเลิกการลงทะเบียนนี้");
+      }
+      if (regData.courseId !== courseId) {
+        throw new Error("ข้อมูลหลักสูตรไม่ตรงกัน");
+      }
+      if (sessionId && regData.sessionId && regData.sessionId !== sessionId) {
+        throw new Error("ข้อมูลเซสชันไม่ตรงกัน");
+      }
+
+      // Read current course data
       const courseDoc = await transaction.get(courseRef);
-      if (!courseDoc.exists()) throw new Error("ไม่พบข้อมูลหลักสูตร");
+      if (!courseDoc.exists()) {
+        throw new Error("ไม่พบข้อมูลหลักสูตร");
+      }
       const currentCourse = courseDoc.data() as Course;
 
-      // 3. Update session seats
+      // Update session seats
       let updatedSessions = [...(currentCourse.sessions || [])];
       let enrolledSeats = currentCourse.enrolledSeats || 0;
 
@@ -131,30 +220,37 @@ export const RegistrationService = {
           sessionIndex = 0;
         }
 
-        if (sessionIndex !== -1 && updatedSessions[sessionIndex].enrolledSeats > 0) {
+        if (sessionIndex !== -1 && (updatedSessions[sessionIndex].enrolledSeats || 0) > 0) {
           updatedSessions[sessionIndex].enrolledSeats -= 1;
         }
       } else {
         // Legacy course or single session
-        if (updatedSessions.length > 0 && updatedSessions[0].enrolledSeats > 0) {
+        if (updatedSessions.length > 0 && (updatedSessions[0].enrolledSeats || 0) > 0) {
           updatedSessions[0].enrolledSeats -= 1;
         } else if (enrolledSeats > 0) {
           enrolledSeats -= 1;
         }
       }
 
-      // 4. Update total registrations to keep fallback logic correct
+      // Maintain consistency of enrolledSeats with sessions
+      if (updatedSessions.length > 0) {
+        enrolledSeats = updatedSessions.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0);
+      } else if (enrolledSeats > 0) {
+        enrolledSeats -= 1;
+      }
+
+      // Update total registrations count
       const newTotal = Math.max(0, (currentCourse.totalRegistrations || 0) - 1);
 
-      // 5. Update course document
+      // Update course document
       transaction.update(courseRef, { 
         sessions: updatedSessions,
         enrolledSeats: enrolledSeats,
         totalRegistrations: newTotal
       });
 
-      // 6. Delete registration doc
-      transaction.delete(regRef);
+      // Delete the registration doc
+      transaction.delete(regRef!);
     });
   },
 

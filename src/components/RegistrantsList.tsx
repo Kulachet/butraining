@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { getRatingsArray } from "./analytics/types";
 import { 
   Search, 
@@ -139,8 +139,13 @@ export const RegistrantsList: React.FC = () => {
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const regs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Registration[];
-      // Sort by sequenceNumber in frontend
-      regs.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
+      // Preserve intended registration order: sequenceNumber ascending, fallback to registeredAt
+      regs.sort((a, b) => {
+        const seqA = a.sequenceNumber || 0;
+        const seqB = b.sequenceNumber || 0;
+        if (seqA !== seqB) return seqA - seqB;
+        return new Date(a.registeredAt || 0).getTime() - new Date(b.registeredAt || 0).getTime();
+      });
       setRegistrations(regs);
       setLoading(false);
     }, (error) => {
@@ -150,6 +155,17 @@ export const RegistrantsList: React.FC = () => {
 
     return () => unsubscribe();
   }, [selectedCourseId]);
+
+  // Generate continuous display sequence number mapped from sorted active registrations
+  // so the running number remains continuous (01, 02, 03...) after cancellations
+  // and search/filtering retains each applicant's true continuous position in the course
+  const registrationOrderMap = useMemo(() => {
+    const map = new Map<string, number>();
+    registrations.forEach((reg, index) => {
+      map.set(reg.id, index + 1);
+    });
+    return map;
+  }, [registrations]);
 
   const filteredRegistrations = registrations.filter(reg => {
     const matchesSearch = 
@@ -241,18 +257,21 @@ export const RegistrantsList: React.FC = () => {
     }
 
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
-    const data = filteredRegistrations.map(reg => ({
-      "ลำดับ": reg.sequenceNumber,
-      "ลำดับการเช็คอิน": reg.checkInSequenceNumber || "-",
-      "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
-      "ชื่อ-นามสกุล": formatInstructorName(reg.userName),
-      "อีเมล": reg.userEmail,
-      "หน่วยงาน": reg.userDepartment,
-      "ตำแหน่ง": reg.userPosition,
-      "สถานะการเข้าอบรม": reg.attended ? "มาอบรมจริง" : "ยังไม่ได้เช็คอิน",
-      "เวลาเช็คอิน": reg.checkInAt ? new Date(reg.checkInAt).toLocaleString('th-TH') : "-",
-      "วันที่ลงทะเบียน": new Date(reg.registeredAt).toLocaleString('th-TH')
-    }));
+    const data = filteredRegistrations.map((reg, index) => {
+      const displaySequenceNumber = registrationOrderMap.get(reg.id) ?? (index + 1);
+      return {
+        "ลำดับ": displaySequenceNumber,
+        "ลำดับการเช็คอิน": reg.checkInSequenceNumber || "-",
+        "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
+        "ชื่อ-นามสกุล": formatInstructorName(reg.userName),
+        "อีเมล": reg.userEmail,
+        "หน่วยงาน": reg.userDepartment,
+        "ตำแหน่ง": reg.userPosition,
+        "สถานะการเข้าอบรม": reg.attended ? "มาอบรมจริง" : "ยังไม่ได้เช็คอิน",
+        "เวลาเช็คอิน": reg.checkInAt ? new Date(reg.checkInAt).toLocaleString('th-TH') : "-",
+        "วันที่ลงทะเบียน": new Date(reg.registeredAt).toLocaleString('th-TH')
+      };
+    });
 
     const csv = Papa.unparse(data);
     const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
@@ -1007,21 +1026,23 @@ export const RegistrantsList: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
-                {filteredRegistrations.map((reg, index) => (
-                  <tr key={reg.id} className="hover:bg-slate-50/50 transition-colors group">
-                    <td className="px-6 py-4 text-center">
-                      <input 
-                        type="checkbox"
-                        checked={selectedRegIds.includes(reg.id)}
-                        onChange={() => toggleSelectReg(reg.id)}
-                        className="w-4 h-4 rounded text-crimson focus:ring-crimson cursor-pointer border-slate-300"
-                      />
-                    </td>
-                    <td className="px-8 py-4">
-                      <span className="text-[14px] lg:text-[16px] font-bold text-slate-300 group-hover:text-crimson transition-colors">
-                        {String(reg.sequenceNumber).padStart(2, '0')}
-                      </span>
-                    </td>
+                {filteredRegistrations.map((reg, index) => {
+                  const displaySequenceNumber = registrationOrderMap.get(reg.id) ?? (index + 1);
+                  return (
+                    <tr key={reg.id} className="hover:bg-slate-50/50 transition-colors group">
+                      <td className="px-6 py-4 text-center">
+                        <input 
+                          type="checkbox"
+                          checked={selectedRegIds.includes(reg.id)}
+                          onChange={() => toggleSelectReg(reg.id)}
+                          className="w-4 h-4 rounded text-crimson focus:ring-crimson cursor-pointer border-slate-300"
+                        />
+                      </td>
+                      <td className="px-8 py-4">
+                        <span className="text-[14px] lg:text-[16px] font-bold text-slate-300 group-hover:text-crimson transition-colors">
+                          {String(displaySequenceNumber).padStart(2, '0')}
+                        </span>
+                      </td>
                     <td className="px-8 py-4">
                       {reg.checkInSequenceNumber ? (
                         <span className="text-[14px] lg:text-[16px] font-bold text-emerald-500">
@@ -1085,7 +1106,8 @@ export const RegistrantsList: React.FC = () => {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
