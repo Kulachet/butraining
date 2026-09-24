@@ -116,52 +116,52 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ defaultTab }) => {
           <nav className="flex-1 p-4 space-y-2">
             <button 
               onClick={() => { setActiveTab("dashboard"); setViewingApplicants(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "dashboard" ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "dashboard" && !viewingApplicants ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
             >
               <LayoutDashboard className="w-5 h-5" />
               แดชบอร์ด
             </button>
             <button 
               onClick={() => { setActiveTab("courses"); setViewingApplicants(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "courses" ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "courses" && !viewingApplicants ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
             >
               <BookOpen className="w-5 h-5" />
               จัดการหลักสูตร
             </button>
             <button 
               onClick={() => { setActiveTab("history"); setViewingApplicants(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "history" ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "history" && !viewingApplicants ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
             >
               <History className="w-5 h-5" />
               ประวัติการจัดการอบรม
             </button>
             <button 
               onClick={() => { setActiveTab("instructors"); setViewingApplicants(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "instructors" ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "instructors" && !viewingApplicants ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
             >
               <Users className="w-5 h-5" />
               ข้อมูลอาจารย์
             </button>
             <button 
               onClick={() => { setActiveTab("registrants"); setViewingApplicants(null); }}
-              className={`w-full flex items-center justify-between px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "registrants" ? "bg-slate-900 text-white shadow-xl shadow-slate-200" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+              className={`w-full flex items-center justify-between px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "registrants" && !viewingApplicants ? "bg-slate-900 text-white shadow-xl shadow-slate-200" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
             >
               <div className="flex items-center gap-3">
                 <FileText className="w-5 h-5" />
                 รายชื่อผู้สมัคร
               </div>
-              {activeTab === "registrants" && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
+              {activeTab === "registrants" && !viewingApplicants && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
             </button>
             <button 
               onClick={() => { setActiveTab("evaluations"); setViewingApplicants(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "evaluations" ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "evaluations" && !viewingApplicants ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
             >
               <BarChart3 className="w-5 h-5" />
               ผลการประเมิน
             </button>
             <button 
               onClick={() => { setActiveTab("settings"); setViewingApplicants(null); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "settings" ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "settings" && !viewingApplicants ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
             >
               <Settings className="w-5 h-5" />
               ตั้งค่าระบบ
@@ -211,15 +211,19 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ defaultTab }) => {
                       <span className="flex items-center gap-1.5"><MapPin className="w-4 h-4" /> {viewingApplicants.locationDetail || viewingApplicants.locationType}</span>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => navigate(`/admin/course/edit/${viewingApplicants.id}`)}
-                    className="p-3 bg-slate-50 hover:bg-slate-100 text-slate-600 rounded-xl transition-all"
-                  >
-                    <Edit3 className="w-5 h-5" />
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={() => navigate(`/admin/course/edit/${viewingApplicants.id}`)}
+                      className="p-3 bg-slate-50 hover:bg-slate-100 text-slate-600 rounded-xl transition-all"
+                    >
+                      <Edit3 className="w-5 h-5" />
+                    </button>
+                  </div>
                 </div>
               </div>
-              <ApplicantList course={viewingApplicants} />
+              <ApplicantList 
+                course={viewingApplicants} 
+              />
             </div>
           ) : (
             <>

@@ -7,7 +7,6 @@ import {
 } from "firebase/auth";
 import { 
   doc, 
-  getDoc, 
   setDoc, 
   serverTimestamp,
   query,
@@ -114,7 +113,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               email => email.toLowerCase() === userEmail
             );
 
-          console.log("Logged in as:", currentUser.email);
+          console.log("Logged in as:", currentUser.email, "| UID:", currentUser.uid);
           console.log("Is Admin:", isUserAdmin);
 
           setIsAdmin(isUserAdmin);

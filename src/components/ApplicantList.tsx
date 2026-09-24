@@ -133,14 +133,6 @@ export const ApplicantList: React.FC<Props> = ({ course }) => {
             <Download className="w-4 h-4" />
             Export CSV
           </button>
-          <button 
-            onClick={handleSendCertificates}
-            disabled={processing}
-            className="flex items-center gap-2 px-4 py-2 bg-crimson hover:bg-crimson-dark text-white rounded-xl font-medium text-[14px] lg:text-[16px] transition-all disabled:opacity-50"
-          >
-            {processing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
-            ส่งประกาศนียบัตร
-          </button>
         </div>
       </div>
 

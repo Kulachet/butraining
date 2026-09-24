@@ -24,9 +24,16 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isAuthenticated() && 
-             (request.auth.token.email.lower() == "kulachet.l@bu.ac.th" || request.auth.token.email.lower() == "napaporn.pu@bu.ac.th") &&
-             request.auth.token.email_verified == true;
+      return isAuthenticated() && (
+        (
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
+        ) ||
+        (request.auth.token.email != null && (
+          request.auth.token.email.lower() == "kulachet.l@bu.ac.th" ||
+          request.auth.token.email.lower() == "napaporn.pu@bu.ac.th"
+        ))
+      );
     }
 
     function isValidInstructor(data) {
@@ -62,6 +69,10 @@ service cloud.firestore {
       // แก้ไข: อนุญาตให้ User ทั่วไปสามารถอัปเดตได้ "เฉพาะ" ฟิลด์จำนวนที่นั่ง (sessions, totalRegistrations, enrolledSeats) เท่านั้น
       allow update: if isAdmin() || (isAuthenticated() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sessions', 'totalRegistrations', 'enrolledSeats']));
       allow create, delete: if isAdmin();
+    }
+
+    match /admins/{adminUid} {
+      allow read, write: if isAdmin();
     }
 
     match /registrations/{regId} {

@@ -327,6 +327,99 @@ export const RegistrantsList: React.FC = () => {
     );
   };
 
+  const handleExportCertRecipientsCsv = () => {
+    const totalRecipients = certRecipients.length + customCertRecipients.length;
+    if (totalRecipients === 0) {
+      toast.error("ไม่มีรายชื่อสำหรับดาวน์โหลด");
+      return;
+    }
+
+    // Helper to safely format cell values: formula injection defense and CSV standard escaping
+    const escapeCsvCell = (val: string | number | null | undefined): string => {
+      if (val === null || val === undefined) return '""';
+      let str = String(val).trim();
+      // Protect against CSV formula injection (=, +, -, @)
+      if (/^[=+\-@]/.test(str)) {
+        str = "'" + str;
+      }
+      // Wrap with quotes and escape internal quotes
+      return `"${str.replace(/"/g, '""')}"`;
+    };
+
+    const headers = [
+      "ลำดับ",
+      "ชื่อ-นามสกุล",
+      "อีเมล",
+      "เลือกส่ง Certificate",
+      "สถานะ"
+    ];
+
+    const rows: string[][] = [];
+
+    // 1. Regular recipients from registrations (in current display order)
+    certRecipients.forEach((r, index) => {
+      const isSelected = certSelectedIds.includes(r.id);
+      const statusLabel = r.certStatus === 'sent' 
+        ? 'ส่งแล้ว' 
+        : r.certStatus === 'failed' 
+        ? 'ล้มเหลว' 
+        : 'ยังไม่ส่ง';
+      
+      rows.push([
+        escapeCsvCell(index + 1),
+        escapeCsvCell(formatInstructorName(r.userName)),
+        escapeCsvCell(r.userEmail),
+        escapeCsvCell(isSelected ? "ใช่" : "ไม่ใช่"),
+        escapeCsvCell(statusLabel)
+      ]);
+    });
+
+    // 2. Custom/manual recipients (in current display order)
+    customCertRecipients.forEach((r, index) => {
+      const isSelected = certSelectedIds.includes(r.id);
+      rows.push([
+        escapeCsvCell(certRecipients.length + index + 1),
+        escapeCsvCell(formatInstructorName(r.name)),
+        escapeCsvCell(r.email),
+        escapeCsvCell(isSelected ? "ใช่" : "ไม่ใช่"),
+        escapeCsvCell("ยังไม่ส่ง")
+      ]);
+    });
+
+    const csvContent = [
+      headers.map(h => `"${h}"`).join(","),
+      ...rows.map(row => row.join(","))
+    ].join("\r\n");
+
+    // Format filename: certificate-recipients_[course-name]_[YYYY-MM-DD].csv
+    const selectedCourse = courses.find(c => c.id === selectedCourseId);
+    const dateStr = new Date().toISOString().split("T")[0];
+    let sanitizedCourseTitle = "";
+    if (selectedCourse?.title) {
+      sanitizedCourseTitle = selectedCourse.title
+        .replace(/[\\/:*?"<>|]/g, "_")
+        .trim()
+        .replace(/\s+/g, "-");
+    }
+
+    const filename = sanitizedCourseTitle
+      ? `certificate-recipients_${sanitizedCourseTitle}_${dateStr}.csv`
+      : `certificate-recipients_${dateStr}.csv`;
+
+    const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", filename);
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    toast.success("ดาวน์โหลดรายชื่อ CSV เรียบร้อยแล้ว");
+  };
+
   const handleValidateCertFolder = async () => {
     if (!certFolderId) {
       toast.error("กรุณาระบุ Folder ID");
@@ -1308,21 +1401,33 @@ export const RegistrantsList: React.FC = () => {
 
                   {/* Recipients Selection */}
                   <div>
-                    <div className="flex items-center justify-between mb-3 px-1">
+                    <div className="flex flex-wrap items-center justify-between gap-3 mb-3 px-1">
                       <div className="flex items-center gap-2">
                         <Users className="w-4 h-4 text-indigo-600" />
                         <h4 className="text-sm font-bold text-slate-700">รายชื่อผู้ที่มาอบรมจริงและเพิ่มเติม ({certRecipients.length + customCertRecipients.length} คน)</h4>
                       </div>
-                      <button 
-                        onClick={() => {
-                          const allIds = [...certRecipients.map(r => r.id), ...customCertRecipients.map(r => r.id)];
-                          if (certSelectedIds.length === allIds.length) setCertSelectedIds([]);
-                          else setCertSelectedIds(allIds);
-                        }}
-                        className="text-xs font-bold text-indigo-600 hover:text-indigo-700"
-                      >
-                        {certSelectedIds.length === (certRecipients.length + customCertRecipients.length) ? "ไม่เลือกทั้งหมด" : "เลือกทั้งหมด"}
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <button 
+                          type="button"
+                          onClick={handleExportCertRecipientsCsv}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors shadow-sm"
+                          title="ดาวน์โหลดรายชื่อผู้รับ Certificate ทั้งหมดเป็นไฟล์ CSV"
+                        >
+                          <Download className="w-3.5 h-3.5 text-slate-600" />
+                          ดาวน์โหลด CSV
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => {
+                            const allIds = [...certRecipients.map(r => r.id), ...customCertRecipients.map(r => r.id)];
+                            if (certSelectedIds.length === allIds.length) setCertSelectedIds([]);
+                            else setCertSelectedIds(allIds);
+                          }}
+                          className="text-xs font-bold text-indigo-600 hover:text-indigo-700"
+                        >
+                          {certSelectedIds.length === (certRecipients.length + customCertRecipients.length) ? "ไม่เลือกทั้งหมด" : "เลือกทั้งหมด"}
+                        </button>
+                      </div>
                     </div>
                     <div className="border border-slate-200 rounded-2xl overflow-hidden max-h-[350px] overflow-y-auto bg-white">
                       <table className="w-full text-left text-sm border-collapse">

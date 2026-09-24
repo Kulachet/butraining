@@ -86,9 +86,24 @@
       "properties": {
         "evaluationQuestions": { "type": "array", "items": { "type": "string" } }
       }
+    },
+    "admins": {
+      "title": "Admin",
+      "description": "Administrative authority registry keyed by UID.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "description": "Admin email address" },
+        "active": { "type": "boolean", "description": "Active status of administrative privileges" },
+        "role": { "type": "string", "description": "Administrative role identifier" }
+      },
+      "required": ["email", "active"]
     }
   },
   "firestore": {
+    "/admins/{adminUid}": {
+      "schema": "admins",
+      "description": "Authorized administrators registry keyed by Firebase Auth UID."
+    },
     "/instructors/{instructorId}": {
       "schema": "instructors",
       "description": "Instructor profiles, keyed by UID."
