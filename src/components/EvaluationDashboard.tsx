@@ -1,33 +1,56 @@
-import React, { useState, useEffect } from "react";
-import { collection, query, where, getDocs, onSnapshot, orderBy } from "firebase/firestore";
+import React, { useState, useEffect, useMemo } from "react";
+import { collection, query, where, getDocs, onSnapshot, orderBy, doc, getDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { Course } from "../types";
-import { getRatingsArray } from "./analytics/types";
-import { BarChart3, ChevronDown, Download, Users, FileText } from "lucide-react";
+import { 
+  analyzeEvaluations, 
+  DEFAULT_QUESTIONS, 
+  getRatingsArray, 
+  EvaluationAnalysisResult 
+} from "../lib/evaluationAnalytics";
+import { exportEvaluationPdf } from "../lib/pdfExport";
+import { EvaluationOverviewTab } from "./analytics/EvaluationOverviewTab";
+import { EvaluationQuestionsTab } from "./analytics/EvaluationQuestionsTab";
+import { EvaluationFeedbackTab } from "./analytics/EvaluationFeedbackTab";
+import { EvaluationCommentsListTab } from "./analytics/EvaluationCommentsListTab";
+import { EvaluationPdfReport } from "./analytics/EvaluationPdfReport";
+
+import { 
+  BarChart3, 
+  ChevronDown, 
+  Download, 
+  FileDown, 
+  FileText, 
+  Eye, 
+  X, 
+  Loader2, 
+  Layers, 
+  MessageSquare, 
+  Sparkles,
+  Calendar,
+  User,
+  CheckCircle2
+} from "lucide-react";
 import Papa from "papaparse";
 import toast from "react-hot-toast";
 
-const QUESTIONS = [
-  "หัวข้อการอบรมมีความน่าสนใจและทันสมัย",
-  "การอบรมครอบคลุมเนื้อหาได้ครบถ้วน",
-  "เนื้อหาสาระ และกิจกรรมของการอบรม เหมาะสม",
-  "สามารถนำความรู้ที่ได้ ไปประยุกต์ใช้ได้จริง",
-  "วิทยากรมีความรู้ ประสบการณ์ และเชี่ยวชาญในหัวข้อที่อบรม",
-  "วิทยากรถ่ายทอดความรู้ได้ดี และมีกิจกรรมที่เหมาะสมกับหัวข้ออบรม",
-  "วิทยากรเปิดโอกาสให้มีส่วนร่วมและแสดงความคิดเห็นอย่างเพียงพอ",
-  "วิทยากรสามารถตอบคำถามได้อย่างเข้าใจและตรงประเด็น",
-  "ระยะเวลาในการอบรม เหมาะสมและสามารถครอบคลุมกิจกรรมต่างๆ",
-  "ความรู้สึกพึงพอใจโดยรวมต่อการอบรมครั้งนี้"
-];
+type ActiveTabType = "overview" | "questions" | "feedback" | "comments";
 
 export const EvaluationDashboard: React.FC = () => {
   const [courses, setCourses] = useState<Course[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
   const [evaluations, setEvaluations] = useState<any[]>([]);
+  const [questions, setQuestions] = useState<string[]>(DEFAULT_QUESTIONS);
   const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<ActiveTabType>("overview");
 
+  // PDF Export states
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [pdfProgressText, setPdfProgressText] = useState("");
+  const [showPdfPreview, setShowPdfPreview] = useState(false);
+
+  // Fetch courses list
   useEffect(() => {
-    // Fetch courses
     const q = query(collection(db, "courses"), orderBy("date", "desc"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setCourses(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Course[]);
@@ -35,6 +58,24 @@ export const EvaluationDashboard: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
+  // Fetch custom questions from settings if available
+  useEffect(() => {
+    const fetchQuestions = async () => {
+      try {
+        const settingsDoc = await getDoc(doc(db, "settings", "evaluation"));
+        if (settingsDoc.exists() && settingsDoc.data().questions && Array.isArray(settingsDoc.data().questions)) {
+          setQuestions(settingsDoc.data().questions);
+        } else {
+          setQuestions(DEFAULT_QUESTIONS);
+        }
+      } catch (err) {
+        console.error("Error fetching evaluation questions:", err);
+      }
+    };
+    fetchQuestions();
+  }, []);
+
+  // Fetch evaluations when course changes
   useEffect(() => {
     if (!selectedCourseId) {
       setEvaluations([]);
@@ -46,7 +87,7 @@ export const EvaluationDashboard: React.FC = () => {
       try {
         const evalsQ = query(collection(db, "evaluations"), where("courseId", "==", selectedCourseId));
         const snap = await getDocs(evalsQ);
-        const data = snap.docs.map(doc => doc.data());
+        const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setEvaluations(data);
       } catch (error) {
         console.error("Error fetching evaluations:", error);
@@ -58,112 +99,221 @@ export const EvaluationDashboard: React.FC = () => {
     fetchEvals();
   }, [selectedCourseId]);
 
+  const selectedCourse = useMemo(() => {
+    return courses.find(c => c.id === selectedCourseId) || null;
+  }, [courses, selectedCourseId]);
+
+  // Reactive Analytics
+  const analysis: EvaluationAnalysisResult = useMemo(() => {
+    return analyzeEvaluations(evaluations, questions, selectedCourse?.title || "หลักสูตร");
+  }, [evaluations, questions, selectedCourse]);
+
+  // CSV Export with UTF-8 BOM and Formula Injection Protection
   const handleExportCSV = () => {
     if (evaluations.length === 0) {
       toast.error("ไม่มีข้อมูลสำหรับดาวน์โหลด");
       return;
     }
-    const selectedCourse = courses.find(c => c.id === selectedCourseId);
-    
-    const data = evaluations.map((evalData, index) => {
-      let row: any = {
-        "ลำดับ": index + 1,
-        "ชื่อ-นามสกุล": evalData.userName,
-        "อีเมล": evalData.userEmail,
-        "เวลาประเมิน": new Date(evalData.createdAt).toLocaleString('th-TH')
-      };
-      for (let i = 0; i < 10; i++) {
-        row[`ข้อที่ ${i+1}`] = getRatingsArray(evalData.ratings)[i] || "-";
+
+    const sanitizeCsvField = (val: any) => {
+      if (val === null || val === undefined) return "";
+      const str = String(val);
+      if (/^[=+\-@\t\r]/.test(str)) {
+        return `'${str}`;
       }
-      row["ข้อเสนอแนะ"] = evalData.suggestion || "-";
+      return str;
+    };
+
+    const data = evaluations.map((evalData, index) => {
+      const ratingsArr = getRatingsArray(evalData.ratings, questions.length);
+      const row: any = {
+        "ลำดับ": index + 1,
+        "ชื่อ-นามสกุล": sanitizeCsvField(evalData.userName || "-"),
+        "อีเมล": sanitizeCsvField(evalData.userEmail || "-"),
+        "เวลาประเมิน": evalData.createdAt ? new Date(evalData.createdAt).toLocaleString('th-TH') : "-"
+      };
+
+      questions.forEach((q, qIdx) => {
+        row[`ข้อที่ ${qIdx + 1}: ${q}`] = ratingsArr[qIdx] || "-";
+      });
+
+      row["ข้อเสนอแนะเพิ่มเติม"] = sanitizeCsvField(evalData.suggestion || "-");
       return row;
     });
 
     const csv = Papa.unparse(data);
-    const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
     const link = document.createElement("a");
     const url = URL.createObjectURL(blob);
+    const sanitizedTitle = (selectedCourse?.title || "หลักสูตร").replace(/[/\\?%*:|"<>]/g, "-").trim();
+    const dateStr = new Date().toISOString().split("T")[0];
     link.setAttribute("href", url);
-    link.setAttribute("download", `ผลประเมิน_${selectedCourse?.title || 'หลักสูตร'}.csv`);
-    link.style.visibility = 'hidden';
+    link.setAttribute("download", `ผลประเมิน_${sanitizedTitle}_${dateStr}.csv`);
+    link.style.visibility = "hidden";
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    
-    toast.success("ดาวน์โหลดผลประเมินเรียบร้อยแล้ว");
+    URL.revokeObjectURL(url);
+
+    toast.success("ดาวน์โหลดผลประเมิน (CSV) เรียบร้อยแล้ว");
   };
 
-  // Calculate averages
-  const getAverage = (qIndex: number) => {
-    if (evaluations.length === 0) return 0;
-    const sum = evaluations.reduce((acc, curr) => acc + (getRatingsArray(curr.ratings)[qIndex] || 0), 0);
-    return (sum / evaluations.length).toFixed(2);
+  // PDF Export
+  const handleExportPDF = async () => {
+    if (!selectedCourse || evaluations.length === 0) {
+      toast.error("ไม่มีข้อมูลประเมินสำหรับสร้างรายงาน PDF");
+      return;
+    }
+
+    setIsExportingPdf(true);
+    setPdfProgressText("กำลังเริ่มต้นสร้างรายงาน...");
+
+    try {
+      const sanitizedTitle = (selectedCourse.title || "หลักสูตร").replace(/[/\\?%*:|"<>]/g, "-").trim();
+      const dateStr = new Date().toISOString().split("T")[0];
+      const filename = `รายงานผลการประเมิน_${sanitizedTitle}_${dateStr}.pdf`;
+
+      await exportEvaluationPdf("evaluation-pdf-report", filename, (msg) => {
+        setPdfProgressText(msg);
+      });
+
+      toast.success("ดาวน์โหลดรายงาน PDF เรียบร้อยแล้ว");
+    } catch (err: any) {
+      console.error("PDF export error:", err);
+      toast.error(err.message || "เกิดข้อผิดพลาดในการสร้างไฟล์ PDF");
+    } finally {
+      setIsExportingPdf(false);
+      setPdfProgressText("");
+    }
   };
-  
-  const overallAverage = evaluations.length > 0 
-    ? (evaluations.reduce((acc, curr) => {
-        const ratingsArray = getRatingsArray(curr.ratings);
-        const userAvg = QUESTIONS.reduce((s, _, i) => s + (ratingsArray[i] || 0), 0) / QUESTIONS.length;
-        return acc + userAvg;
-      }, 0) / evaluations.length).toFixed(2)
-    : 0;
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
+      {/* Top Header */}
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
         <div>
-          <h1 className="text-[28px] lg:text-[32px] font-bold text-[#333333] tracking-[0.02em] leading-[1.6]">
-            ผลการประเมิน
+          <div className="flex items-center gap-2 mb-2">
+            <span className="px-3 py-1 bg-crimson/10 text-crimson rounded-full text-xs font-bold uppercase tracking-wider">
+              Evaluation Analytics
+            </span>
+            <span className="text-slate-400 text-xs font-medium">ฝ่ายพัฒนาวิชาการ (Academic Development)</span>
+          </div>
+          <h1 className="text-[28px] lg:text-[34px] font-extrabold text-[#333333] tracking-tight leading-[1.3]">
+            ผลการประเมินโครงการอบรม
           </h1>
-          <p className="text-[#4A4A4A] font-normal text-[14px] lg:text-[16px] max-w-sm leading-[1.7]">
-            เลือกหลักสูตรที่ต้องการดูสรุปผลประเมิน หรือดาวน์โหลดข้อมูลเบื้องตัน
+          <p className="text-[#4A4A4A] font-normal text-[14px] lg:text-[16px] max-w-xl leading-[1.6] mt-1">
+            แดชบอร์ดวิเคราะห์ผลการประเมินความพึงพอใจ จำแนกตามมิติและหัวข้อคำถาม พร้อมส่งออกรายงานเชิงบริหาร
           </p>
         </div>
-        
-        {evaluations.length > 0 && (
-          <button 
-            onClick={handleExportCSV}
-            className="flex items-center justify-center gap-2 px-6 py-3 bg-crimson hover:bg-crimson-dark text-white rounded-xl text-[14px] font-medium transition-all shadow-md shadow-crimson/20"
-          >
-            <Download className="w-4 h-4" />
-            ดาวน์โหลดผลประเมินทั้งหมด
-          </button>
+
+        {/* Action Buttons */}
+        {evaluations.length > 0 && selectedCourse && (
+          <div className="flex flex-wrap items-center gap-3">
+            {/* PDF Preview Button */}
+            <button
+              onClick={() => setShowPdfPreview(true)}
+              className="flex items-center gap-2 px-4 py-3 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all shadow-xs"
+              title="ดูตัวอย่างรายงาน PDF ก่อนดาวน์โหลด"
+            >
+              <Eye className="w-4 h-4 text-slate-500" />
+              ดูตัวอย่างรายงาน PDF
+            </button>
+
+            {/* CSV Export Button */}
+            <button
+              onClick={handleExportCSV}
+              className="flex items-center gap-2 px-4 py-3 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all shadow-xs"
+            >
+              <Download className="w-4 h-4 text-slate-500" />
+              ดาวน์โหลด CSV
+            </button>
+
+            {/* PDF Export Button */}
+            <button
+              onClick={handleExportPDF}
+              disabled={isExportingPdf}
+              className="flex items-center gap-2 px-6 py-3 bg-crimson hover:bg-crimson-dark text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-crimson/20 disabled:opacity-60"
+            >
+              {isExportingPdf ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>{pdfProgressText || "กำลังส่งออก..."}</span>
+                </>
+              ) : (
+                <>
+                  <FileDown className="w-4 h-4" />
+                  <span>ดาวน์โหลดรายงาน PDF</span>
+                </>
+              )}
+            </button>
+          </div>
         )}
       </div>
 
-      <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm">
-        <label className="block text-sm font-semibold text-slate-700 mb-3">เลือกหลักสูตรที่ต้องการดูผล:</label>
-        <div className="relative border border-slate-200 rounded-xl overflow-hidden hover:border-crimson focus-within:ring-2 focus-within:ring-crimson/20 transition-all bg-slate-50">
-          <select 
+      {/* Course Selector Card */}
+      <div className="bg-white rounded-3xl p-6 md:p-8 border border-slate-200 shadow-sm">
+        <label className="block text-sm font-bold text-slate-700 mb-3">
+          เลือกหลักสูตรที่ต้องการดูผลการประเมิน:
+        </label>
+        <div className="relative border border-slate-200 rounded-2xl overflow-hidden hover:border-crimson focus-within:ring-2 focus-within:ring-crimson/20 transition-all bg-slate-50">
+          <select
             value={selectedCourseId}
-            onChange={e => setSelectedCourseId(e.target.value)}
-            className="w-full appearance-none px-4 py-3.5 bg-transparent outline-none cursor-pointer text-sm font-medium text-slate-700"
+            onChange={(e) => setSelectedCourseId(e.target.value)}
+            className="w-full appearance-none px-5 py-4 bg-transparent outline-none cursor-pointer text-sm font-semibold text-slate-800"
           >
-            <option value="">-- กรุณาเลือกหลักสูตร --</option>
-            {courses.map(course => (
+            <option value="">-- กรุณาเลือกหลักสูตรเพื่อดูผลวิเคราะห์ --</option>
+            {courses.map((course) => (
               <option key={course.id} value={course.id}>
-                {course.title} {course.date ? `(${course.date})` : ''}
+                {course.title} {course.date ? `(วันที่อบรม: ${course.date})` : ""}
               </option>
             ))}
           </select>
-          <div className="absolute top-0 right-0 h-full flex items-center pr-4 pointer-events-none text-slate-400">
+          <div className="absolute top-0 right-0 h-full flex items-center pr-5 pointer-events-none text-slate-400">
             <ChevronDown className="w-5 h-5" />
           </div>
         </div>
+
+        {selectedCourse && (
+          <div className="mt-4 pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
+            <div className="flex flex-wrap items-center gap-4">
+              <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                <Calendar className="w-4 h-4 text-crimson" /> {selectedCourse.date || "ไม่ระบุวันที่"}
+              </span>
+              <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                <User className="w-4 h-4 text-slate-400" /> วิทยากร: {selectedCourse.instructorName || "ไม่ระบุ"}
+              </span>
+              {selectedCourse.category && (
+                <span className="bg-slate-100 px-2.5 py-0.5 rounded-lg text-slate-600 font-medium">
+                  หมวดหมู่: {selectedCourse.category}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-slate-700">ผู้ตอบแบบประเมิน:</span>
+              <span className="px-2.5 py-0.5 rounded-full bg-crimson/10 text-crimson font-black">
+                {evaluations.length} คน
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
+      {/* Main Content Area */}
       {!selectedCourseId ? (
         <div className="bg-white py-24 rounded-3xl border border-dashed border-slate-200 text-center">
           <div className="w-20 h-20 bg-slate-50 rounded-2xl flex items-center justify-center mx-auto mb-6 transform rotate-3">
             <BarChart3 className="w-10 h-10 text-slate-300" />
           </div>
-          <h3 className="text-xl font-bold text-slate-700 mb-2">เลือกหลักสูตรเพื่อดูผลประเมิน</h3>
-          <p className="text-slate-400 font-light">ข้อมูลประเมินจะแสดงขึ้นหลังจากที่คุณเลือกหลักสูตรด้านบน</p>
+          <h3 className="text-xl font-bold text-slate-700 mb-2">เลือกหลักสูตรเพื่อดูรายงานผลประเมิน</h3>
+          <p className="text-slate-400 font-light max-w-md mx-auto text-sm">
+            เลือกโครงการอบรมจากเมนูด้านบนเพื่อเริ่มต้นดูผลวิเคราะห์ทางสถิติ การจัดกลุ่มความคิดเห็น และส่งออกรายงานเชิงบริหาร
+          </p>
         </div>
       ) : loading ? (
         <div className="bg-white py-24 rounded-3xl border border-slate-200 flex flex-col justify-center items-center">
           <div className="w-10 h-10 border-4 border-crimson/20 border-t-crimson rounded-full animate-spin mb-4" />
-          <p className="text-slate-500">กำลังดึงข้อมูล...</p>
+          <p className="text-slate-500 font-medium text-sm">กำลังคำนวณและประมวลผลข้อมูลการประเมิน...</p>
         </div>
       ) : evaluations.length === 0 ? (
         <div className="bg-white py-24 rounded-3xl border border-dashed border-slate-200 text-center">
@@ -171,85 +321,155 @@ export const EvaluationDashboard: React.FC = () => {
             <FileText className="w-10 h-10 text-slate-300" />
           </div>
           <h3 className="text-xl font-bold text-slate-700 mb-2">ยังไม่มีผลการประเมิน</h3>
-          <p className="text-slate-400 font-light">หลักสูตรนี้ยังไม่มีผู้ส่งแบบประเมินผล</p>
+          <p className="text-slate-400 font-light text-sm">
+            หลักสูตรนี้ยังไม่มีผู้ส่งแบบประเมินความพึงพอใจในระบบ
+          </p>
         </div>
       ) : (
-        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex items-center gap-4">
-              <div className="w-14 h-14 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center shrink-0">
-                <Users className="w-6 h-6" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-1">ผู้ประเมินทั้งหมด</p>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-3xl font-bold text-slate-800">{evaluations.length}</span>
-                  <span className="text-slate-400 font-medium text-sm">คน</span>
-                </div>
-              </div>
-            </div>
-            
-            <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex items-center gap-4">
-              <div className="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center shrink-0">
-                <BarChart3 className="w-6 h-6" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-1">คะแนนเฉลี่ยรวม</p>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-3xl font-bold text-slate-800">{overallAverage}</span>
-                  <span className="text-slate-400 font-medium text-sm">จาก 5.00</span>
-                </div>
-              </div>
-            </div>
+        <div className="space-y-8 animate-in fade-in duration-300">
+          {/* Segmented Tab Navigation */}
+          <div className="flex border-b border-slate-200 pb-1 gap-2 overflow-x-auto">
+            <button
+              onClick={() => setActiveTab("overview")}
+              className={`flex items-center gap-2 px-5 py-3 rounded-2xl text-sm font-bold transition-all whitespace-nowrap ${
+                activeTab === "overview"
+                  ? "bg-crimson text-white shadow-md shadow-crimson/20"
+                  : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              ภาพรวม (Executive Summary)
+            </button>
+
+            <button
+              onClick={() => setActiveTab("questions")}
+              className={`flex items-center gap-2 px-5 py-3 rounded-2xl text-sm font-bold transition-all whitespace-nowrap ${
+                activeTab === "questions"
+                  ? "bg-crimson text-white shadow-md shadow-crimson/20"
+                  : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              <Layers className="w-4 h-4" />
+              คะแนนรายข้อ (Rating Detail)
+            </button>
+
+            <button
+              onClick={() => setActiveTab("feedback")}
+              className={`flex items-center gap-2 px-5 py-3 rounded-2xl text-sm font-bold transition-all whitespace-nowrap ${
+                activeTab === "feedback"
+                  ? "bg-crimson text-white shadow-md shadow-crimson/20"
+                  : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              <Sparkles className="w-4 h-4" />
+              การจัดกลุ่มความคิดเห็น (Analysis & Themes)
+            </button>
+
+            <button
+              onClick={() => setActiveTab("comments")}
+              className={`flex items-center gap-2 px-5 py-3 rounded-2xl text-sm font-bold transition-all whitespace-nowrap ${
+                activeTab === "comments"
+                  ? "bg-crimson text-white shadow-md shadow-crimson/20"
+                  : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              <MessageSquare className="w-4 h-4" />
+              ข้อมูลความคิดเห็นทั้งหมด (Appendix)
+            </button>
           </div>
 
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="p-6 border-b border-slate-100 bg-slate-50/50">
-              <h3 className="text-lg font-bold text-slate-800">สรุปคะแนนแต่ละหัวข้อประเมิน</h3>
-            </div>
-            <div className="divide-y divide-slate-100">
-              {QUESTIONS.map((q, i) => {
-                const avg = Number(getAverage(i));
-                return (
-                  <div key={i} className="p-4 md:p-6 flex flex-col md:flex-row md:items-center gap-4 hover:bg-slate-50 transition-colors">
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-slate-700"><span className="text-crimson mr-2">{i + 1}.</span>{q}</p>
-                    </div>
-                    <div className="flex items-center gap-4 md:w-64">
-                      <div className="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden">
-                        <div 
-                          className={`h-full rounded-full ${avg >= 4.5 ? 'bg-emerald-500' : avg >= 3.5 ? 'bg-blue-500' : avg >= 2.5 ? 'bg-amber-500' : 'bg-red-500'}`}
-                          style={{ width: `${(avg / 5) * 100}%` }}
-                        />
-                      </div>
-                      <span className="text-sm font-bold w-12 text-right text-slate-700">{avg.toFixed(2)}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          {/* Tab Views */}
+          {activeTab === "overview" && (
+            <EvaluationOverviewTab
+              analysis={analysis}
+              courseTitle={selectedCourse?.title || "หลักสูตร"}
+            />
+          )}
 
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex items-center gap-3">
-              <FileText className="w-5 h-5 text-slate-500" />
-              <h3 className="text-lg font-bold text-slate-800">ข้อเสนอแนะเพิ่มเติมจากผู้ประเมิน</h3>
+          {activeTab === "questions" && (
+            <EvaluationQuestionsTab
+              questionStats={analysis.questionStats}
+            />
+          )}
+
+          {activeTab === "feedback" && (
+            <EvaluationFeedbackTab
+              analysis={analysis}
+              onNavigateToCommentsTab={() => setActiveTab("comments")}
+            />
+          )}
+
+          {activeTab === "comments" && (
+            <EvaluationCommentsListTab
+              comments={analysis.comments}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Hidden Offscreen PDF Report Render Container for html2canvas */}
+      {selectedCourse && evaluations.length > 0 && (
+        <div style={{ position: "fixed", left: "-9999px", top: 0, opacity: 0, pointerEvents: "none" }}>
+          <EvaluationPdfReport
+            course={selectedCourse}
+            analysis={analysis}
+            questions={questions}
+          />
+        </div>
+      )}
+
+      {/* PDF Preview Modal */}
+      {showPdfPreview && selectedCourse && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-100 w-full max-w-4xl max-h-[92vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-5 bg-white border-b border-slate-200 flex items-center justify-between shrink-0">
+              <div>
+                <h3 className="text-base font-bold text-slate-800">
+                  ตัวอย่างเอกสารรายงาน PDF (Executive Report Preview)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {selectedCourse.title} • จำลองหน้ากระดาษ A4 เสมือนจริง
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleExportPDF}
+                  disabled={isExportingPdf}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-crimson hover:bg-crimson-dark text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-crimson/20 disabled:opacity-60"
+                >
+                  {isExportingPdf ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>{pdfProgressText || "กำลังส่งออก..."}</span>
+                    </>
+                  ) : (
+                    <>
+                      <FileDown className="w-3.5 h-3.5" />
+                      <span>ดาวน์โหลด PDF ตอนนี้</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setShowPdfPreview(false)}
+                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
-            <div className="p-6 gap-4 grid grid-cols-1">
-              {evaluations.filter(e => e.suggestion && e.suggestion.trim() !== "").length > 0 ? (
-                evaluations.filter(e => e.suggestion && e.suggestion.trim() !== "").map((e, idx) => (
-                  <div key={idx} className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                    <p className="text-slate-700 text-sm leading-relaxed whitespace-pre-wrap">{e.suggestion}</p>
-                    <div className="text-[11px] text-slate-400 mt-3 pt-3 border-t border-slate-200">
-                      จาก: {e.userName} ({new Date(e.createdAt).toLocaleString('th-TH')})
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="text-center py-8 text-slate-400 font-light text-sm">
-                  - ไม่มีข้อเสนอแนะเพิ่มเติม -
-                </div>
-              )}
+
+            {/* Modal Body / Scrollable Document */}
+            <div className="flex-1 overflow-y-auto p-6 flex flex-col items-center gap-6">
+              <div className="scale-90 sm:scale-100 origin-top shadow-xl">
+                <EvaluationPdfReport
+                  course={selectedCourse}
+                  analysis={analysis}
+                  questions={questions}
+                />
+              </div>
             </div>
           </div>
         </div>

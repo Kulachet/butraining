@@ -64,8 +64,13 @@ export const AnalyticsDashboard: React.FC = () => {
           } catch(e){}
         }
 
+        const coursesList = courseSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        if (coursesList.length > 0) {
+          setSelectedCourseId(prev => (prev === "all" ? coursesList[0].id : prev));
+        }
+
         setData({
-          courses: courseSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+          courses: coursesList,
           registrations: rawRegs as any,
           evaluations: evalSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) })),
           instructors: instSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
@@ -141,7 +146,13 @@ export const AnalyticsDashboard: React.FC = () => {
 
       {/* Renders Active Tab */}
       <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-        {activeTab === "overview" && <OverviewTab data={filteredData} />}
+        {activeTab === "overview" && (
+          <OverviewTab 
+            data={data} 
+            selectedCourseId={selectedCourseId}
+            onSelectCourse={(id) => setSelectedCourseId(id)}
+          />
+        )}
         {activeTab === "course" && <CourseEvaluationTab data={filteredData} />}
         {activeTab === "instructor" && <InstructorPerformanceTab data={filteredData} />}
         {activeTab === "participant" && <ParticipantAnalyticsTab data={filteredData} />}
