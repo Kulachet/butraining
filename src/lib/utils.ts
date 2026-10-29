@@ -24,7 +24,8 @@ export function cn(...inputs: ClassValue[]) {
 export function formatInstructorName(
   nameOrInstructor: string | { name?: string; id?: string; position?: string } | undefined | null,
   id?: string,
-  position?: string
+  position?: string,
+  lang: 'th' | 'en' = 'th'
 ): string {
   let name = "";
   let finalId = id;
@@ -46,7 +47,7 @@ export function formatInstructorName(
   const idPrefix = trimmedId ? trimmedId.charAt(0).toUpperCase() : "";
   const trimmedPos = (finalPosition || "").toString().trim();
 
-  // 1. Identify higher academic titles in name
+  // 1. Identify higher academic titles in name (Thai)
   const academicTitleRegexes = [
     { regex: /^(?:ผู้ช่วยศาสตราจารย์\s*ดร\.?|ผศ\.?\s*ดร\.?|ผศ\.\s*ดร)/i, title: "ผศ.ดร." },
     { regex: /^(?:รองศาสตราจารย์\s*ดร\.?|รศ\.?\s*ดร\.?|รศ\.\s*ดร)/i, title: "รศ.ดร." },
@@ -57,35 +58,18 @@ export function formatInstructorName(
     { regex: /^(?:ด็อกเตอร์|ดร\.|ดร\s+)/i, title: "ดร." },
   ];
 
-  let nameTitle: string | null = null;
-  for (const item of academicTitleRegexes) {
-    if (item.regex.test(trimmedName)) {
-      nameTitle = item.title;
-      break;
-    }
-  }
+  const englishAcademicTitleRegexes = [
+    /^(?:Asst\.?\s*Prof\.?\s*Dr\.?|Assistant\s*Professor\s*Dr\.?)/i,
+    /^(?:Assoc\.?\s*Prof\.?\s*Dr\.?|Associate\s*Professor\s*Dr\.?)/i,
+    /^(?:Prof\.?\s*Dr\.?|Professor\s*Dr\.?)/i,
+    /^(?:Asst\.?\s*Prof\.?|Assistant\s*Professor)/i,
+    /^(?:Assoc\.?\s*Prof\.?|Associate\s*Professor)/i,
+    /^(?:Prof\.?|Professor)/i,
+    /^(?:Dr\.?|Doctor)/i,
+    /^(?:Lecturer|Instructor)/i,
+  ];
 
-  // 2. Identify higher academic titles in position
-  let posTitle: string | null = null;
-  if (trimmedPos) {
-    const posPatterns = [
-      { regex: /(?:ผู้ช่วยศาสตราจารย์\s*ดร\.?|ผศ\.?\s*ดร\.?|ผศ\.\s*ดร)/i, title: "ผศ.ดร." },
-      { regex: /(?:รองศาสตราจารย์\s*ดร\.?|รศ\.?\s*ดร\.?|รศ\.\s*ดร)/i, title: "รศ.ดร." },
-      { regex: /(?:ศาสตราจารย์\s*ดร\.?|ศ\.?\s*ดร\.?|ศ\.\s*ดร)/i, title: "ศ.ดร." },
-      { regex: /(?:ผู้ช่วยศาสตราจารย์|^ผศ\.?|\bผศ\.)/i, title: "ผศ." },
-      { regex: /(?:รองศาสตราจารย์|^รศ\.?|\bรศ\.)/i, title: "รศ." },
-      { regex: /(?:ศาสตราจารย์|^ศ\.?|\bศ\.)/i, title: "ศ." },
-      { regex: /(?:ดร\.?|ด็อกเตอร์)/i, title: "ดร." },
-    ];
-    for (const item of posPatterns) {
-      if (item.regex.test(trimmedPos)) {
-        posTitle = item.title;
-        break;
-      }
-    }
-  }
-
-  // 3. Strip leading generic prefixes (อ., อาจารย์, คุณ) without corrupting names starting with vowels
+  // 2. Strip leading generic prefixes (อ., อาจารย์, คุณ) without corrupting names starting with vowels
   const stripGenericPrefix = (str: string): string => {
     let s = str.trim();
     if (/^อาจารย์\s*/i.test(s)) {
@@ -111,24 +95,76 @@ export function formatInstructorName(
 
   const cleanBaseName = stripGenericPrefix(trimmedName);
 
-  // === CASE 1: C-prefix or Z-prefix ===
-  // Rule: Always display "คุณ" instead of "อ."
+  // Check if name has an English academic title (e.g. 'Asst. Prof. Dr. Charuwan Kritpracha')
+  const hasEnglishTitleInName = englishAcademicTitleRegexes.some(r => r.test(cleanBaseName) || r.test(trimmedName));
+  const hasEnglishTitleInPos = englishAcademicTitleRegexes.some(r => r.test(trimmedPos));
+
+  // If name already contains a verified English academic title, always preserve it as-is without Thai prefix
+  if (hasEnglishTitleInName) {
+    return cleanBaseName;
+  }
+
+  // Check Thai academic title in name
+  let nameTitle: string | null = null;
+  for (const item of academicTitleRegexes) {
+    if (item.regex.test(trimmedName) || item.regex.test(cleanBaseName)) {
+      nameTitle = item.title;
+      break;
+    }
+  }
+
+  // Check Thai academic title in position
+  let posTitle: string | null = null;
+  if (trimmedPos) {
+    for (const item of academicTitleRegexes) {
+      if (item.regex.test(trimmedPos)) {
+        posTitle = item.title;
+        break;
+      }
+    }
+  }
+
+  // If position has an English academic title
+  if (hasEnglishTitleInPos) {
+    return `${trimmedPos} ${cleanBaseName}`.trim();
+  }
+
+  // Detect whether name is written in Latin/English characters
+  const isLatinName = /^[A-Za-z]/.test(cleanBaseName);
+
+  // In an English course context, or for English/Latin instructor names:
+  // Do NOT prepend Thai 'อ.' prefix to English academic titles or English names
+  if (lang === 'en' || isLatinName) {
+    if (nameTitle) {
+      return trimmedName;
+    }
+    if (posTitle) {
+      return `${posTitle}${cleanBaseName}`;
+    }
+    if (isLatinName) {
+      // For external or staff with English names in English context, do not prepend 'คุณ'
+      if (lang === 'en') {
+        return cleanBaseName;
+      }
+      return (idPrefix === "C" || idPrefix === "Z") ? `คุณ${cleanBaseName}` : cleanBaseName;
+    }
+    // Thai name in English course: preserve existing title or clean name without Thai 'อ.'
+    return cleanBaseName;
+  }
+
+  // === THAI COURSE CONTEXT ===
+  // CASE 1: C-prefix or Z-prefix
   if (idPrefix === "C" || idPrefix === "Z") {
     return `คุณ${cleanBaseName}`;
   }
 
-  // === CASE 2: A-prefix (or default / unspecified ID) ===
-  // 1) Has academic title in name: preserve existing title, do not add "อ."
+  // CASE 2: A-prefix (Academic)
   if (nameTitle) {
     return trimmedName;
   }
-
-  // 2) Has academic title in position: prepend that academic title
   if (posTitle) {
     return `${posTitle}${cleanBaseName}`;
   }
-
-  // 3) No existing academic title: add "อ."
   return `อ.${cleanBaseName}`;
 }
 
@@ -272,7 +308,7 @@ export function formatDateLocalized(
 /**
  * Standard Time Formatter:
  * Thai: 09.00–16.00 น.
- * English: 09:00 - 16:00
+ * English: 9:00 AM – 4:00 PM
  */
 export function formatSessionTime(startTime?: string, endTime?: string, lang: 'th' | 'en' = 'th'): string {
   if (!startTime && !endTime) return "";
@@ -299,11 +335,54 @@ export function formatSessionTime(startTime?: string, endTime?: string, lang: 't
     return `${sTh || eTh} น.`;
   }
 
-  // English
-  if (s && e) {
-    return `${s} - ${e}`;
+  // English: 12-hour format with AM/PM (e.g. 9:00 AM – 4:00 PM)
+  const format12Hour = (timeStr?: string): string => {
+    if (!timeStr) return "";
+    const trimmed = timeStr.trim();
+    const parts = trimmed.split(":");
+    if (parts.length >= 2) {
+      const rawH = parseInt(parts[0], 10);
+      const m = parts[1].padStart(2, '0');
+      if (!isNaN(rawH)) {
+        const ampm = rawH >= 12 ? 'PM' : 'AM';
+        const h12 = rawH % 12 === 0 ? 12 : rawH % 12;
+        return `${h12}:${m} ${ampm}`;
+      }
+    }
+    return trimmed;
+  };
+
+  const sEn = format12Hour(s);
+  const eEn = format12Hour(e);
+
+  if (sEn && eEn) {
+    return `${sEn} – ${eEn}`;
   }
-  return s || e;
+  return sEn || eEn;
+}
+
+/**
+ * Formats session name according to course presentation language.
+ * E.g.: "วันที่ 1" -> "Day 1" when lang is 'en'.
+ */
+export function formatSessionName(sessionName?: string, index: number = 0, lang: 'th' | 'en' = 'th'): string {
+  const dayNum = index + 1;
+  if (lang === 'en') {
+    if (!sessionName || sessionName.startsWith("วันที่")) {
+      const match = sessionName?.match(/\d+/);
+      const num = match ? match[0] : dayNum;
+      return `Day ${num}`;
+    }
+    return sessionName;
+  }
+
+  // Thai
+  if (!sessionName || sessionName.startsWith("Day")) {
+    const match = sessionName?.match(/\d+/);
+    const num = match ? match[0] : dayNum;
+    return `วันที่ ${num}`;
+  }
+  return sessionName;
 }
 
 /**
@@ -311,14 +390,19 @@ export function formatSessionTime(startTime?: string, endTime?: string, lang: 't
  * For legacy courses without sessions, derives a single session from date/startTime/endTime.
  * Always returns sessions sorted chronologically by date then startTime with stable IDs.
  */
-export function getCourseSessions(course: Partial<import("../types").Course> | undefined | null): import("../types").CourseSession[] {
+export function getCourseSessions(
+  course: Partial<import("../types").Course> | undefined | null,
+  lang?: 'th' | 'en'
+): import("../types").CourseSession[] {
   if (!course) return [];
   
+  const courseLang: 'th' | 'en' = lang || (course.language === 'en' ? 'en' : 'th');
+
   if (Array.isArray(course.sessions) && course.sessions.length > 0) {
     const list = course.sessions.map((s, idx) => ({
       id: s.id || (s as any).sessionId || `session_${idx + 1}`,
       sessionId: (s as any).sessionId || s.id || `session_${idx + 1}`,
-      sessionName: s.sessionName || `Day ${idx + 1}`,
+      sessionName: formatSessionName(s.sessionName, idx, courseLang),
       date: s.date || course.date || "",
       startTime: s.startTime || course.startTime || "09:00",
       endTime: s.endTime || course.endTime || "12:00",
@@ -328,16 +412,19 @@ export function getCourseSessions(course: Partial<import("../types").Course> | u
       enrolledSeats: s.enrolledSeats ?? 0
     }));
 
-    // If ThailandPSF or multi-day workshop only has 1 session persisted,
-    // supplement the second date (2026-12-15) from the course announcement schedule
-    if (list.length === 1 && (course.isMultiDay || course.title?.includes("ThailandPSF"))) {
+    // If ThailandPSF, UKPSF or multi-day workshop only has 1 session persisted,
+    // supplement the second date from the course announcement schedule
+    if (list.length === 1 && (course.isMultiDay || course.title?.includes("ThailandPSF") || course.title?.includes("UKPSF"))) {
       const s1 = list[0];
-      const s2Date = s1.date === "2026-12-14" ? "2026-12-15" : "";
+      let s2Date = "";
+      if (s1.date === "2026-12-14") s2Date = "2026-12-15";
+      if (s1.date === "2026-11-12") s2Date = "2026-11-13";
+      
       if (s2Date) {
         list.push({
-          id: "psf_day_2",
-          sessionId: "psf_day_2",
-          sessionName: "วันที่ 2",
+          id: "session_day_2",
+          sessionId: "session_day_2",
+          sessionName: courseLang === 'en' ? "Day 2" : "วันที่ 2",
           date: s2Date,
           startTime: s1.startTime || "09:00",
           endTime: s1.endTime || "16:00",
@@ -357,10 +444,10 @@ export function getCourseSessions(course: Partial<import("../types").Course> | u
   }
 
   if (course.date) {
-    return [{
+    const list: import("../types").CourseSession[] = [{
       id: "default",
       sessionId: "default",
-      sessionName: "วันที่ 1",
+      sessionName: courseLang === 'en' ? "Day 1" : "วันที่ 1",
       date: course.date,
       startTime: course.startTime || "09:00",
       endTime: course.endTime || "12:00",
@@ -369,6 +456,28 @@ export function getCourseSessions(course: Partial<import("../types").Course> | u
       maxSeats: course.maxSeats ?? 40,
       enrolledSeats: course.enrolledSeats ?? 0
     }];
+
+    if (course.isMultiDay || course.title?.includes("ThailandPSF") || course.title?.includes("UKPSF")) {
+      let s2Date = "";
+      if (course.date === "2026-12-14") s2Date = "2026-12-15";
+      if (course.date === "2026-11-12") s2Date = "2026-11-13";
+      if (s2Date) {
+        list.push({
+          id: "session_day_2",
+          sessionId: "session_day_2",
+          sessionName: courseLang === 'en' ? "Day 2" : "วันที่ 2",
+          date: s2Date,
+          startTime: course.startTime || "09:00",
+          endTime: course.endTime || "16:00",
+          locationType: 'On-site',
+          locationDetail: course.locationDetail || "",
+          maxSeats: course.maxSeats ?? 40,
+          enrolledSeats: 0
+        });
+      }
+    }
+
+    return list;
   }
 
   return [];

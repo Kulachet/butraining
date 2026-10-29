@@ -58,6 +58,7 @@ export interface Course {
   sessions?: CourseSession[];
   isMultiDay?: boolean;
   multiDayPublicationBlocked?: boolean;
+  language?: 'th' | 'en';
   totalRegistrations?: number;
   maxSeats?: number;
   enrolledSeats?: number;

@@ -11,8 +11,9 @@ import { motion, AnimatePresence } from "motion/react";
 import { Search, Filter, Sparkles, Loader2, X, Clock, MapPin, CheckCircle2, AlertCircle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
-import { cn, generateGoogleCalendarUrl, formatInstructorName, isMultiDayCourse } from "../lib/utils";
-import { useLanguage } from "../contexts/LanguageContext";
+import { cn, generateGoogleCalendarUrl, formatInstructorName, formatSessionTime, formatSessionName, isMultiDayCourse } from "../lib/utils";
+import { buildRegistrationEmailPayload } from "../lib/registrationEmail";
+import { useLanguage, resolveCourseLang, courseTranslations } from "../contexts/LanguageContext";
 import { LanguageSwitcher } from "../components/LanguageSwitcher";
 
 interface CancelTarget {
@@ -21,6 +22,7 @@ interface CancelTarget {
   sessionId?: string;
   sessionName?: string;
   registrationId?: string;
+  courseLanguage?: 'th' | 'en';
 }
 
 export const LandingPage: React.FC = () => {
@@ -147,36 +149,22 @@ export const LandingPage: React.FC = () => {
 
   const handleFinalRegister = async (course: Course, session?: Session) => {
     setRegistering(course.id);
+    const courseLang = resolveCourseLang(course);
+    const ct = courseTranslations[courseLang];
+
     try {
       await RegistrationService.registerForCourse(course, instructor!, session);
       
       const isMulti = isMultiDayCourse(course);
-      toast.success(lang === 'en' ? "Registration successful!" : "ลงทะเบียนสำเร็จเรียบร้อยแล้ว!");
+      toast.success(ct.registrationSuccess);
       
-      // Auto-send Calendar Invite via GAS using backward-compatible payload contract
+      // Auto-send Calendar Invite and Localized Confirmation Email via GAS
       const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
-      const formattedGuestName = formatInstructorName(instructor!.name, instructor!.id, instructor!.position);
-      const formattedSpeakerName = formatInstructorName(course.instructorName, course.instructorId);
-
-      const locationText = session?.locationDetail || course.locationDetail || course.sessions?.[0]?.locationDetail || "ไม่ระบุ";
-      const dateText = session?.date || course.date || course.sessions?.[0]?.date || "";
-      const startText = session?.startTime || course.startTime || course.sessions?.[0]?.startTime || "09:00";
-      const endText = session?.endTime || course.endTime || course.sessions?.[0]?.endTime || "16:00";
-
-      const payload = {
-        courseTitle: course.title,
-        description: course.description || "",
-        instructorName: formattedSpeakerName || course.instructorName || "",
-        location: locationText,
-        guestEmail: instructor!.email,
-        guestName: formattedGuestName,
-        recipientName: formattedGuestName,
-        guestId: instructor!.id,
-        guestPosition: instructor!.position || "",
-        date: dateText,
-        startTime: startText,
-        endTime: endText
-      };
+      const payload = buildRegistrationEmailPayload({
+        course,
+        instructor: instructor!,
+        session
+      });
 
       fetch(gasUrl, {
         method: "POST",
@@ -188,24 +176,15 @@ export const LandingPage: React.FC = () => {
       })
       .then(() => {
         if (isMulti) {
-          toast.success(
-            lang === 'en'
-              ? "Calendar invite sent for Day 1. (Note: Additional workshop dates must be scheduled manually)"
-              : "ส่งคำเชิญปฏิทินสำหรับวันแรกแล้ว (หมายเหตุ: วันอบรมถัดไปกรุณาบันทึกลงปฏิทินเพิ่มเติม)",
-            { duration: 6000 }
-          );
+          toast.success(ct.calendarSentMulti, { duration: 6000 });
         } else {
-          toast.success(
-            lang === 'en' 
-              ? "Calendar invitation sent. Please check your email." 
-              : "ส่งคำเชิญลงปฏิทินเรียบร้อยแล้ว กรุณาตรวจสอบอีเมล"
-          );
+          toast.success(ct.calendarSentSingle);
         }
       })
       .catch(err => {
         console.error("Calendar fetch error:", err);
         toast.error(
-          lang === 'en'
+          courseLang === 'en'
             ? "Could not send automated Calendar invitation. Your registration remains confirmed."
             : "ไม่สามารถส่งคำเชิญลงปฏิทินอัตโนมัติได้ (การลงทะเบียนของท่านยังคงสมบูรณ์)"
         );
@@ -217,13 +196,13 @@ export const LandingPage: React.FC = () => {
       const errorMessage = error.message || "";
       
       if (errorMessage.includes("Already registered")) {
-        toast.error(lang === 'en' ? "You are already registered for this workshop" : "ท่านได้ลงทะเบียนหลักสูตรนี้ไปแล้ว");
+        toast.error(ct.alreadyRegistered);
       } else if (errorMessage.includes("Session is full") || errorMessage.includes("Course is full")) {
-        toast.error(lang === 'en' ? "Sorry, this workshop is full" : "ขออภัย ที่นั่งสำหรับหลักสูตรนี้เต็มแล้ว");
+        toast.error(ct.workshopFull);
       } else if (errorMessage.includes("permission-denied") || errorMessage.includes("insufficient permissions")) {
-        toast.error("ไม่มีสิทธิ์ในการดำเนินการ (Permission Denied) กรุณาติดต่อผู้ดูแลระบบ");
+        toast.error(courseLang === 'en' ? "Insufficient permissions. Please contact system administrator." : "ไม่มีสิทธิ์ในการดำเนินการ (Permission Denied) กรุณาติดต่อผู้ดูแลระบบ");
       } else {
-        toast.error(`การลงทะเบียนขัดข้อง: ${errorMessage || "กรุณาลองใหม่อีกครั้ง"}`);
+        toast.error(courseLang === 'en' ? `Registration error: ${errorMessage || "Please try again"}` : `การลงทะเบียนขัดข้อง: ${errorMessage || "กรุณาลองใหม่อีกครั้ง"}`);
       }
     } finally {
       setRegistering(null);
@@ -232,6 +211,7 @@ export const LandingPage: React.FC = () => {
 
   const handleOpenCancelModal = (courseId: string, sessionId?: string) => {
     const course = courses.find(c => c.id === courseId);
+    const courseLang = resolveCourseLang(course);
     const matchingReg = userRegistrations.find(r => 
       r.courseId === courseId && (!sessionId || r.sessionId === sessionId)
     );
@@ -243,16 +223,20 @@ export const LandingPage: React.FC = () => {
     setCourseToCancel({
       courseId,
       sessionId: actualSessionId,
-      courseTitle: course?.title || matchingReg?.courseTitle || "หลักสูตร",
+      courseTitle: course?.title || matchingReg?.courseTitle || (courseLang === 'en' ? "Workshop" : "หลักสูตร"),
       sessionName: actualSessionName,
       registrationId: matchingReg?.id,
+      courseLanguage: courseLang,
     });
   };
 
   const handleConfirmCancel = async (target: CancelTarget) => {
     const currentUserId = user?.uid || instructor?.uid;
+    const targetLang = target.courseLanguage || 'th';
+    const ct = courseTranslations[targetLang];
+
     if (!currentUserId) {
-      toast.error("กรุณาเข้าสู่ระบบก่อนทำรายการ");
+      toast.error(targetLang === 'en' ? "Please sign in before proceeding" : "กรุณาเข้าสู่ระบบก่อนทำรายการ");
       return;
     }
     setRegistering(target.courseId);
@@ -263,15 +247,15 @@ export const LandingPage: React.FC = () => {
         target.sessionId, 
         target.registrationId
       );
-      toast.success("ยกเลิกการลงทะเบียนเรียบร้อยแล้ว");
+      toast.success(ct.cancelSuccess);
       setCourseToCancel(null);
     } catch (error: any) {
       console.error("Cancel error:", error);
       const msg = error?.message || "";
-      if (msg.includes("ไม่พบข้อมูลการลงทะเบียน")) {
-        toast.error("ไม่พบข้อมูลการลงทะเบียน กรุณารีเฟรชหน้าแล้วลองอีกครั้ง");
+      if (msg.includes("ไม่พบข้อมูลการลงทะเบียน") || msg.includes("not found")) {
+        toast.error(targetLang === 'en' ? "Registration record not found. Please refresh the page." : "ไม่พบข้อมูลการลงทะเบียน กรุณารีเฟรชหน้าแล้วลองอีกครั้ง");
       } else {
-        toast.error(`ยกเลิกไม่สำเร็จ: ${msg || "กรุณาลองใหม่อีกครั้ง"}`);
+        toast.error(targetLang === 'en' ? `Cancellation failed: ${msg || "Please try again"}` : `ยกเลิกไม่สำเร็จ: ${msg || "กรุณาลองใหม่อีกครั้ง"}`);
       }
     } finally {
       setRegistering(null);
@@ -474,42 +458,50 @@ export const LandingPage: React.FC = () => {
               <div className="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mx-auto mb-6">
                 <AlertCircle className="w-8 h-8" />
               </div>
-              <h3 className="text-2xl font-bold text-center text-slate-800 mb-2">{t("cancelConfirmTitle")}</h3>
-              {courseToCancel.courseTitle && (
-                <p className="text-center font-medium text-slate-700 mb-1 px-4 truncate">
-                  {courseToCancel.courseTitle}
-                </p>
-              )}
-              {courseToCancel.sessionName && (
-                <p className="text-center text-xs text-crimson font-medium mb-3">
-                  {t("cancelSessionLabel")} {courseToCancel.sessionName}
-                </p>
-              )}
-              <p className="text-center text-slate-500 mb-8 text-sm">
-                {t("cancelConfirmDesc")}
-              </p>
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setCourseToCancel(null)}
-                  className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors disabled:opacity-50"
-                  disabled={registering === courseToCancel.courseId}
-                >
-                  {t("cancelBack")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleConfirmCancel(courseToCancel)}
-                  className="flex-1 py-3 px-4 bg-red-500 hover:bg-red-600 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-                  disabled={registering === courseToCancel.courseId}
-                >
-                  {registering === courseToCancel.courseId ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    t("cancelConfirmAction")
-                  )}
-                </button>
-              </div>
+              {(() => {
+                const cancelLang = courseToCancel.courseLanguage || 'th';
+                const cct = courseTranslations[cancelLang];
+                return (
+                  <>
+                    <h3 className="text-2xl font-bold text-center text-slate-800 mb-2">{cct.cancelConfirmTitle}</h3>
+                    {courseToCancel.courseTitle && (
+                      <p className="text-center font-medium text-slate-700 mb-1 px-4 truncate">
+                        {courseToCancel.courseTitle}
+                      </p>
+                    )}
+                    {courseToCancel.sessionName && (
+                      <p className="text-center text-xs text-crimson font-medium mb-3">
+                        {cancelLang === 'en' ? "Session:" : "เซสชัน:"} {courseToCancel.sessionName}
+                      </p>
+                    )}
+                    <p className="text-center text-slate-500 mb-8 text-sm">
+                      {cct.cancelConfirmDesc}
+                    </p>
+                    <div className="flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setCourseToCancel(null)}
+                        className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors disabled:opacity-50"
+                        disabled={registering === courseToCancel.courseId}
+                      >
+                        {cct.cancelBack}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmCancel(courseToCancel)}
+                        className="flex-1 py-3 px-4 bg-red-500 hover:bg-red-600 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                        disabled={registering === courseToCancel.courseId}
+                      >
+                        {registering === courseToCancel.courseId ? (
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                        ) : (
+                          cct.cancelConfirmAction
+                        )}
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
             </motion.div>
           </motion.div>
         )}
@@ -517,119 +509,129 @@ export const LandingPage: React.FC = () => {
 
       {/* Session Selection Modal */}
       <AnimatePresence>
-        {selectedCourseForSession && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setSelectedCourseForSession(null)}
-              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative bg-white rounded-[2.5rem] shadow-2xl p-8 max-w-lg w-full overflow-hidden"
-            >
-              <div className="flex justify-between items-start mb-6">
-                <div>
-                  <h3 className="text-2xl font-medium text-slate-800 mb-1 tracking-wide">เลือกเซสชันที่ต้องการ</h3>
-                  <p className="text-slate-500 font-light tracking-wide">{selectedCourseForSession.title}</p>
-                </div>
-                <button 
-                  onClick={() => setSelectedCourseForSession(null)}
-                  className="p-2 hover:bg-slate-50 rounded-full transition-colors"
-                >
-                  <X className="w-6 h-6 text-slate-300" />
-                </button>
-              </div>
+        {selectedCourseForSession && (() => {
+          const sessionCourseLang = resolveCourseLang(selectedCourseForSession);
+          const sct = courseTranslations[sessionCourseLang];
+          const courseSessionsList = selectedCourseForSession.sessions || [];
 
-              <div className="space-y-4 mb-8">
-                {selectedCourseForSession.sessions.map((session) => {
-                  const isRegisteredThisSession = userRegistrations.some(
-                    r => r.courseId === selectedCourseForSession.id && r.sessionId === session.sessionId
+          return (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setSelectedCourseForSession(null)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              />
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="relative bg-white rounded-[2.5rem] shadow-2xl p-8 max-w-lg w-full overflow-hidden"
+              >
+                <div className="flex justify-between items-start mb-6">
+                  <div>
+                    <h3 className="text-2xl font-medium text-slate-800 mb-1 tracking-wide">{sct.selectSession}</h3>
+                    <p className="text-slate-500 font-light tracking-wide">{selectedCourseForSession.title}</p>
+                  </div>
+                  <button 
+                    onClick={() => setSelectedCourseForSession(null)}
+                    className="p-2 hover:bg-slate-50 rounded-full transition-colors"
+                  >
+                    <X className="w-6 h-6 text-slate-300" />
+                  </button>
+                </div>
+
+                <div className="space-y-4 mb-8">
+                  {courseSessionsList.map((session, idx) => {
+                    const isRegisteredThisSession = userRegistrations.some(
+                      r => r.courseId === selectedCourseForSession.id && r.sessionId === session.sessionId
+                    );
+                    return (
+                      <button
+                        key={session.sessionId}
+                        onClick={() => setSelectedSessionId(session.sessionId)}
+                        className={cn(
+                          "w-full p-5 rounded-2xl border-2 text-left transition-all flex items-center justify-between group",
+                          selectedSessionId === session.sessionId 
+                            ? "border-crimson bg-crimson/5 ring-4 ring-crimson/10" 
+                            : "border-slate-100 hover:border-slate-200 bg-slate-50",
+                          isRegisteredThisSession && "border-green-100 bg-green-50/10"
+                        )}
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className={cn(
+                            "w-12 h-12 rounded-xl flex items-center justify-center transition-colors",
+                            selectedSessionId === session.sessionId 
+                              ? "bg-crimson text-white" 
+                              : isRegisteredThisSession
+                                ? "bg-green-600 text-white"
+                                : "bg-white text-slate-400"
+                          )}>
+                            <Clock className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <div className="font-black text-slate-900 flex items-center gap-2">
+                              {formatSessionName(session.sessionName, idx, sessionCourseLang)}
+                              {isRegisteredThisSession && (
+                                <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
+                                  {sct.registered}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-sm text-slate-500 font-medium flex items-center gap-3 mt-1">
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3 h-3" /> {formatSessionTime(session.startTime, session.endTime, sessionCourseLang)}
+                              </span>
+                              <span className="flex items-center gap-1">
+                                <MapPin className="w-3 h-3" /> {session.locationDetail || (sessionCourseLang === 'en' ? "On-site" : "ไม่ระบุ")}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        {selectedSessionId === session.sessionId && (
+                          <CheckCircle2 className={cn("w-6 h-6", isRegisteredThisSession ? "text-green-600" : "text-crimson")} />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {(() => {
+                  const isSelectedReg = userRegistrations.some(
+                    r => r.courseId === selectedCourseForSession.id && r.sessionId === selectedSessionId
                   );
                   return (
                     <button
-                      key={session.sessionId}
-                      onClick={() => setSelectedSessionId(session.sessionId)}
+                      onClick={() => {
+                        const session = courseSessionsList.find(s => s.sessionId === selectedSessionId);
+                        if (isSelectedReg) {
+                          handleOpenCancelModal(selectedCourseForSession.id, selectedSessionId!);
+                          setSelectedCourseForSession(null);
+                        } else {
+                          handleFinalRegister(selectedCourseForSession, session);
+                        }
+                      }}
+                      disabled={!selectedSessionId || registering === selectedCourseForSession.id}
                       className={cn(
-                        "w-full p-5 rounded-2xl border-2 text-left transition-all flex items-center justify-between group",
-                        selectedSessionId === session.sessionId 
-                          ? "border-crimson bg-crimson/5 ring-4 ring-crimson/10" 
-                          : "border-slate-100 hover:border-slate-200 bg-slate-50",
-                        isRegisteredThisSession && "border-green-100 bg-green-50/10"
+                        "w-full font-medium py-4 rounded-2xl shadow-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 tracking-wide",
+                        isSelectedReg
+                          ? "bg-white hover:bg-red-50 text-red-500 border border-red-200 shadow-sm"
+                          : "bg-crimson hover:bg-crimson-dark text-white shadow-crimson/10"
                       )}
                     >
-                      <div className="flex items-center gap-4">
-                        <div className={cn(
-                          "w-12 h-12 rounded-xl flex items-center justify-center transition-colors",
-                          selectedSessionId === session.sessionId 
-                            ? "bg-crimson text-white" 
-                            : isRegisteredThisSession
-                              ? "bg-green-600 text-white"
-                              : "bg-white text-slate-400"
-                        )}>
-                          <Clock className="w-6 h-6" />
-                        </div>
-                        <div>
-                          <div className="font-black text-slate-900 flex items-center gap-2">
-                            {session.sessionName}
-                            {isRegisteredThisSession && (
-                              <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
-                                ลงทะเบียนแล้ว
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-sm text-slate-500 font-medium flex items-center gap-3 mt-1">
-                            <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {session.startTime} - {session.endTime}</span>
-                            <span className="flex items-center gap-1"><MapPin className="w-3 h-3" /> {session.locationDetail}</span>
-                          </div>
-                        </div>
-                      </div>
-                      {selectedSessionId === session.sessionId && (
-                        <CheckCircle2 className={cn("w-6 h-6", isRegisteredThisSession ? "text-green-600" : "text-crimson")} />
+                      {registering === selectedCourseForSession.id ? (
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <>{isSelectedReg ? sct.cancelThisSession : sct.confirmRegistration}</>
                       )}
                     </button>
                   );
-                })}
-              </div>
-
-              {(() => {
-                const isSelectedReg = userRegistrations.some(
-                  r => r.courseId === selectedCourseForSession.id && r.sessionId === selectedSessionId
-                );
-                return (
-                  <button
-                    onClick={() => {
-                      const session = selectedCourseForSession.sessions.find(s => s.sessionId === selectedSessionId);
-                      if (isSelectedReg) {
-                        handleOpenCancelModal(selectedCourseForSession.id, selectedSessionId!);
-                        setSelectedCourseForSession(null);
-                      } else {
-                        handleFinalRegister(selectedCourseForSession, session);
-                      }
-                    }}
-                    disabled={!selectedSessionId || registering === selectedCourseForSession.id}
-                    className={cn(
-                      "w-full font-medium py-4 rounded-2xl shadow-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 tracking-wide",
-                      isSelectedReg
-                        ? "bg-white hover:bg-red-50 text-red-500 border border-red-200 shadow-sm"
-                        : "bg-crimson hover:bg-crimson-dark text-white shadow-crimson/10"
-                    )}
-                  >
-                    {registering === selectedCourseForSession.id ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                    ) : (
-                      <>{isSelectedReg ? "ยกเลิกการลงทะเบียนเซสชันนี้" : "ยืนยันการลงทะเบียน"}</>
-                    )}
-                  </button>
-                );
-              })()}
-            </motion.div>
-          </div>
-        )}
+                })()}
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
 
       <NewInstructorModal 

@@ -2,8 +2,17 @@ import React, { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Calendar, User, ArrowRight, Clock, Layers, Users, X, MapPin } from "lucide-react";
 import { Course } from "../types";
-import { cn, formatInstructorName, formatDateThai, formatDateLocalized, formatSessionTime, getCourseSessions, parseDateParts } from "../lib/utils";
-import { useLanguage } from "../contexts/LanguageContext";
+import { 
+  cn, 
+  formatInstructorName, 
+  formatDateThai, 
+  formatDateLocalized, 
+  formatSessionTime, 
+  formatSessionName,
+  getCourseSessions, 
+  parseDateParts 
+} from "../lib/utils";
+import { resolveCourseLang, courseTranslations } from "../contexts/LanguageContext";
 
 interface Props {
   course: Course;
@@ -15,10 +24,13 @@ interface Props {
 }
 
 export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEvaluate, isLoading, isRegistered }) => {
-  const { lang, t } = useLanguage();
   const [showImageModal, setShowImageModal] = useState(false);
 
-  const sessions = getCourseSessions(course);
+  // course.language is the single source of truth for course presentation
+  const courseLang = resolveCourseLang(course);
+  const ct = courseTranslations[courseLang];
+
+  const sessions = getCourseSessions(course, courseLang);
   const isMulti = sessions.length > 1;
   const sessionCount = sessions.length;
 
@@ -40,8 +52,8 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
 
   const startTime = sessions[0]?.startTime || course.startTime || "";
   const endTime = sessions[0]?.endTime || course.endTime || "";
-  const locationDetail = sessions[0]?.locationDetail || course.locationDetail || "ไม่ระบุ";
-  const timeString = formatSessionTime(startTime, endTime, lang);
+  const locationDetail = sessions[0]?.locationDetail || course.locationDetail || (courseLang === 'en' ? "On-site" : "ไม่ระบุ");
+  const timeString = formatSessionTime(startTime, endTime, courseLang);
 
   return (
     <>
@@ -65,19 +77,19 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
           <div className="absolute top-3 left-3 flex flex-col gap-2">
             {isCompleted ? (
               <span className="bg-slate-800 text-white text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-lg flex items-center gap-1.5">
-                <Clock className="w-3 h-3" strokeWidth={1.5} /> Completed
+                <Clock className="w-3 h-3" strokeWidth={1.5} /> {ct.completed}
               </span>
             ) : isMulti ? (
               <span className="bg-amber-600 text-white text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-lg flex items-center gap-1.5">
-                <Calendar className="w-3 h-3" /> {lang === 'en' ? `${sessionCount} Days` : `อบรม ${sessionCount} วัน`}
+                <Calendar className="w-3 h-3" /> {ct.workshopBadge(sessionCount)}
               </span>
             ) : isFull ? (
               <span className="bg-orange-500 text-white text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-lg">
-                ที่นั่งเต็มแล้ว
+                {ct.seatFull}
               </span>
             ) : (
               <span className="bg-crimson text-white text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-lg">
-                Open for Registration
+                {ct.openForRegistration}
               </span>
             )}
           </div>
@@ -90,7 +102,7 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
           </h3>
           
           <p className="text-sm font-light text-slate-500 mb-6 whitespace-pre-wrap leading-relaxed">
-            {course.description || "ไม่มีรายละเอียดเพิ่มเติม"}
+            {course.description || ct.noDetails}
           </p>
           
           <div className="space-y-3 mb-6 flex-1">
@@ -98,7 +110,7 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
               <div className="w-8 h-8 rounded-lg bg-slate-50 flex items-center justify-center">
                 <User className="w-4 h-4 text-crimson" strokeWidth={1.5} />
               </div>
-              <span className="font-light tracking-wide">{formatInstructorName(course.instructorName, course.instructorId)}</span>
+              <span className="font-light tracking-wide">{formatInstructorName(course.instructorName, course.instructorId, undefined, courseLang)}</span>
             </div>
 
             {/* Schedule Display: Single-Day vs Multi-Day */}
@@ -110,16 +122,16 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                   </div>
                   <div className="flex flex-col">
                     <span className="font-medium tracking-wide">
-                      {t("trainingDate")} {formatDateLocalized(sessions[0]?.date || course.date, lang)}
+                      {ct.trainingDate} {formatDateLocalized(sessions[0]?.date || course.date, courseLang)}
                     </span>
-                    {timeString && <span className="text-xs font-medium opacity-80">{t("trainingTime")} {timeString}</span>}
+                    {timeString && <span className="text-xs font-medium opacity-80">{ct.trainingTime} {timeString}</span>}
                   </div>
                 </div>
                 <div className="flex items-center gap-3 text-crimson text-sm">
                   <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm shrink-0">
                     <MapPin className="w-4 h-4 text-crimson" strokeWidth={1.5} />
                   </div>
-                  <span className="font-medium tracking-wide text-xs">{t("room")} {locationDetail}</span>
+                  <span className="font-medium tracking-wide text-xs">{ct.room} {locationDetail}</span>
                 </div>
               </div>
             ) : (
@@ -127,10 +139,10 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                 <div className="flex items-center justify-between text-crimson text-xs font-bold border-b border-crimson/10 pb-2">
                   <span className="flex items-center gap-1.5">
                     <Calendar className="w-4 h-4 text-crimson" />
-                    {t("scheduleTitle")} ({sessionCount} {lang === 'en' ? "Days" : "วัน"})
+                    {ct.scheduleTitle(sessionCount)}
                   </span>
                   <span className="text-[10px] font-normal text-slate-500">
-                    {lang === 'en' ? "Specific Dates" : "กำหนดการแต่ละวัน"}
+                    {ct.specificDates}
                   </span>
                 </div>
 
@@ -145,12 +157,12 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                           {idx + 1}
                         </span>
                         <span className="font-medium text-slate-800">
-                          {lang === 'en' ? `Day ${idx + 1}:` : `วันที่ ${idx + 1}:`} {formatDateLocalized(session.date, lang)}
+                          {formatSessionName(session.sessionName, idx, courseLang)}: {formatDateLocalized(session.date, courseLang)}
                         </span>
                       </div>
                       <div className="flex items-center gap-1.5 text-slate-500 font-light text-[11px] pl-7 sm:pl-0">
                         <Clock className="w-3 h-3 text-crimson" />
-                        <span>{formatSessionTime(session.startTime, session.endTime, lang)}</span>
+                        <span>{formatSessionTime(session.startTime, session.endTime, courseLang)}</span>
                       </div>
                     </div>
                   ))}
@@ -158,7 +170,7 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
 
                 <div className="flex items-center gap-2 text-crimson text-xs pt-1.5 border-t border-crimson/10">
                   <MapPin className="w-3.5 h-3.5 shrink-0" />
-                  <span className="font-medium text-xs">{t("room")} {locationDetail}</span>
+                  <span className="font-medium text-xs">{ct.room} {locationDetail}</span>
                 </div>
               </div>
             )}
@@ -169,7 +181,7 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                   <Users className="w-4 h-4 text-crimson" strokeWidth={1.5} />
                 </div>
                 <span className="font-light tracking-wide">
-                  {lang === 'en' ? "Available Seats:" : "ที่นั่งว่าง:"} <span className={cn("font-medium", availableSeats <= 5 ? "text-orange-500" : "text-green-600")}>{availableSeats}</span> / {maxSeats}
+                  {ct.availableSeats} <span className={cn("font-medium", availableSeats <= 5 ? "text-orange-500" : "text-green-600")}>{availableSeats}</span> / {maxSeats}
                 </span>
               </div>
             )}
@@ -181,7 +193,7 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                 onClick={() => onEvaluate?.(course.id)}
                 className="w-full md:w-auto px-8 font-medium py-2.5 text-sm rounded-lg transition-all flex items-center justify-center gap-2 tracking-wide bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/20"
               >
-                {lang === 'en' ? "Take Evaluation" : "ทำแบบประเมินผล"}
+                {ct.takeEvaluation}
                 <ArrowRight className="w-4 h-4" strokeWidth={1.5} />
               </button>
             ) : isRegistered ? (
@@ -194,7 +206,7 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                   <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
                 ) : (
                   <>
-                    <span>{lang === 'en' ? "Cancel Registration" : (t("cancelRegistration") || "ยกเลิกการลงทะเบียน")}</span>
+                    <span>{ct.cancelRegistration}</span>
                     <X className="w-4 h-4" strokeWidth={1.5} />
                   </>
                 )}
@@ -221,12 +233,12 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                 ) : (
                   <>
                     {isCompleted 
-                      ? (lang === 'en' ? "Registration Closed" : "ปิดรับสมัครแล้ว")
+                      ? ct.registrationClosed
                       : isRegistered 
-                        ? (lang === 'en' ? "Cancel Registration" : "ยกเลิกการลงทะเบียน") 
+                        ? ct.cancelRegistration 
                         : isFull 
-                          ? (lang === 'en' ? "Full" : "ที่นั่งเต็ม") 
-                          : (lang === 'en' ? "Register" : "ลงทะเบียนเข้าร่วม")
+                          ? ct.fullyBooked 
+                          : ct.registerNow
                     }
                     {!isCompleted && !isRegistered && !isFull && <ArrowRight className="w-4 h-4" strokeWidth={1.5} />}
                     {isRegistered && !isCompleted && (

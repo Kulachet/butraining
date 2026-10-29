@@ -58,6 +58,7 @@ const schema = z.object({
   maxSeats: z.number().min(1, "จำนวนที่รับต้องมากกว่า 0"),
   status: z.enum(["Active", "Inactive"]),
   isVisible: z.boolean(),
+  language: z.enum(["th", "en"]).optional(),
   imageUrl: z.string().optional(),
   bannerImageBase64: z.string().optional(),
   driveFolderId: z.string().optional(),
@@ -103,12 +104,14 @@ export const CourseEditorPage: React.FC = () => {
       academicYear: "2568",
       maxSeats: 40,
       locationDetail: "",
+      language: "th",
     }
   });
 
   const watchImageUrl = watch("imageUrl");
   const watchBannerImageBase64 = watch("bannerImageBase64");
   const watchIsVisible = watch("isVisible");
+  const watchLanguage = watch("language") || "th";
 
   // Track if sessions have changed from initial load
   const isSessionsDirty = JSON.stringify(sessions) !== sessionsInitial;
@@ -145,6 +148,9 @@ export const CourseEditorPage: React.FC = () => {
                 setValue(key as any, (data as any)[key]);
               }
             });
+
+            // Ensure language defaults to 'th' if missing or invalid
+            setValue("language", data.language === "en" ? "en" : "th");
           } else {
             toast.error("ไม่พบข้อมูลหลักสูตร");
             navigate("/admin");
@@ -582,7 +588,52 @@ export const CourseEditorPage: React.FC = () => {
                     {errors.maxSeats && <p className="text-red-500 text-xs mt-1">{errors.maxSeats.message}</p>}
                   </div>
 
-                  <div className="md:col-span-2 space-y-2">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                        ภาษาหลักสูตร (Course Language)
+                      </label>
+                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                        {watchLanguage === "en" ? "EN: English UI & Email" : "TH: ภาษาไทย"}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 p-1.5 bg-slate-100 rounded-2xl border border-slate-200 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setValue("language", "th", { shouldDirty: true, shouldValidate: true })}
+                        className={cn(
+                          "py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2",
+                          watchLanguage === "th"
+                            ? "bg-white text-crimson shadow-md border border-slate-200 ring-2 ring-crimson/20"
+                            : "text-slate-600 hover:text-slate-900"
+                        )}
+                      >
+                        <span className="text-sm">🇹🇭</span>
+                        <span>TH ภาษาไทย</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setValue("language", "en", { shouldDirty: true, shouldValidate: true })}
+                        className={cn(
+                          "py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2",
+                          watchLanguage === "en"
+                            ? "bg-white text-crimson shadow-md border border-slate-200 ring-2 ring-crimson/20"
+                            : "text-slate-600 hover:text-slate-900"
+                        )}
+                      >
+                        <span className="text-sm">🇬🇧</span>
+                        <span>EN English</span>
+                      </button>
+                    </div>
+                    <input type="hidden" {...register("language")} />
+                    <p className="text-[11px] text-slate-500 leading-normal">
+                      กำหนดภาษาสำหรับการแสดงผลบนหน้าเว็บ (Public UI) กำหนดการอบรม และอีเมลยืนยันการลงทะเบียนของหลักสูตรนี้
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
                     <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">สถานะหลักสูตร</label>
                     <select 
                       {...register("status")}
