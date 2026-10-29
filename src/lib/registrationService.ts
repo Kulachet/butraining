@@ -14,62 +14,116 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { Registration, Course, Instructor, Session, SessionAttendance } from "../types";
-import { formatInstructorName, getCourseSessions } from "./utils";
+import { formatInstructorName, getCourseSessions, isMultiDayCourse } from "./utils";
 
 export const RegistrationService = {
   async registerForCourse(course: Course, instructor: Instructor, session?: Session) {
-    const courseRef = doc(db, "courses", course.id);
-    const regId = `${course.id}_${session?.sessionId || "default"}_${instructor.uid}`;
-    const regRef = doc(db, "registrations", regId);
-    
-    return await runTransaction(db, async (transaction) => {
-      // 1. Check if already registered for this session
-      const regDoc = await transaction.get(regRef);
-      if (regDoc.exists()) throw new Error("Already registered for this session of the course");
+    if (!instructor?.uid) {
+      throw new Error("กรุณาเข้าสู่ระบบก่อนลงทะเบียน");
+    }
+    if (!course?.id) {
+      throw new Error("ไม่พบข้อมูลหลักสูตร");
+    }
 
-      // 2. Get current course data to check seats and get sequence number
+    const courseRef = doc(db, "courses", course.id);
+    const isMulti = isMultiDayCourse(course);
+
+    // 1. Verify existing registration across all formats before creating document
+    // (A) Check Firestore query for any active registration by courseId + userId
+    const existingQ = query(
+      collection(db, "registrations"),
+      where("courseId", "==", course.id),
+      where("userId", "==", instructor.uid),
+      limit(1)
+    );
+    const existingSnap = await getDocs(existingQ);
+    if (!existingSnap.empty) {
+      throw new Error("Already registered for this course");
+    }
+
+    // (B) Verify remaining capacity against actual unique active registrations in Firestore
+    const allRegsSnap = await getDocs(
+      query(collection(db, "registrations"), where("courseId", "==", course.id))
+    );
+    const actualRegisteredCount = allRegsSnap.size;
+    const maxCapacity = course.maxSeats || (course.sessions && course.sessions[0]?.maxSeats) || 50;
+    if (actualRegisteredCount >= maxCapacity) {
+      throw new Error("Course is full");
+    }
+
+    // Determine target sessionId and registration document ID
+    const targetSessionId = isMulti 
+      ? (course.sessions?.[0]?.sessionId || "default")
+      : (session?.sessionId || "default");
+    const targetSessionName = isMulti
+      ? (course.sessions?.[0]?.sessionName || "กำหนดการอบรม")
+      : (session?.sessionName || null);
+
+    const regId = `${course.id}_${targetSessionId}_${instructor.uid}`;
+    const regRef = doc(db, "registrations", regId);
+
+    // Deterministic legacy references to check inside transaction
+    const legacyRef = doc(db, "registrations", `${course.id}_${instructor.uid}`);
+    const defaultRef = doc(db, "registrations", `${course.id}_default_${instructor.uid}`);
+
+    return await runTransaction(db, async (transaction) => {
+      // 2. Transactional uniqueness checks:
+      const regDoc = await transaction.get(regRef);
+      if (regDoc.exists()) throw new Error("Already registered for this course");
+
+      const legacyDoc = await transaction.get(legacyRef);
+      if (legacyDoc.exists()) throw new Error("Already registered for this course");
+
+      const defaultDoc = await transaction.get(defaultRef);
+      if (defaultDoc.exists()) throw new Error("Already registered for this course");
+
+      // 3. Get fresh course data to verify capacity and compute sequence
       const courseDoc = await transaction.get(courseRef);
       if (!courseDoc.exists()) throw new Error("Course not found");
       
       const currentCourse = courseDoc.data() as Course;
-      
-      // 3. Update session seats if applicable
-      let updatedSessions = [...(currentCourse.sessions || [])];
-      let enrolledSeats = currentCourse.enrolledSeats || 0;
+      const currentEnrolled = Math.max(currentCourse.enrolledSeats || 0, actualRegisteredCount);
+      const courseMaxSeats = currentCourse.maxSeats || maxCapacity;
 
-      if (session) {
-        const sessionIndex = updatedSessions.findIndex(s => s.sessionId === session.sessionId);
-        if (sessionIndex === -1) throw new Error("Session not found");
-        
-        if (updatedSessions[sessionIndex].enrolledSeats >= updatedSessions[sessionIndex].maxSeats) {
-          throw new Error("Session is full");
-        }
-        
-        updatedSessions[sessionIndex].enrolledSeats += 1;
-      } else {
-        // Legacy course or single session without explicit session selection
-        if (enrolledSeats >= (currentCourse.maxSeats || 50)) {
-          throw new Error("Course is full");
-        }
-        enrolledSeats += 1;
+      if (currentEnrolled >= courseMaxSeats) {
+        throw new Error("Course is full");
       }
 
-      // 4. Update sequence number
-      const nextSequence = (currentCourse.totalRegistrations || 0) + 1;
-      
-      // 5. Update course document
+      let updatedSessions = [...(currentCourse.sessions || [])];
+      let newEnrolled = currentEnrolled + 1;
+      let nextSequence = Math.max(currentCourse.totalRegistrations || 0, actualRegisteredCount) + 1;
+
+      if (isMulti) {
+        // Multi-day workshop: learners enroll once for the entire workshop cohort.
+        // Synchronize all sessions with the updated cohort seat count.
+        updatedSessions = updatedSessions.map(s => ({
+          ...s,
+          enrolledSeats: newEnrolled
+        }));
+      } else if (session) {
+        const sessionIndex = updatedSessions.findIndex(s => s.sessionId === session.sessionId);
+        if (sessionIndex !== -1) {
+          if ((updatedSessions[sessionIndex].enrolledSeats || 0) >= (updatedSessions[sessionIndex].maxSeats || courseMaxSeats)) {
+            throw new Error("Session is full");
+          }
+          updatedSessions[sessionIndex].enrolledSeats = (updatedSessions[sessionIndex].enrolledSeats || 0) + 1;
+        }
+        newEnrolled = updatedSessions.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0);
+      }
+
+      // 4. Update course document atomically
       transaction.update(courseRef, { 
         sessions: updatedSessions,
-        enrolledSeats: enrolledSeats,
+        enrolledSeats: newEnrolled,
         totalRegistrations: nextSequence
       });
 
-      // 6. Create registration doc
+      // 5. Create registration doc: attended starts false, attendedSessions starts {}
       const regData = {
         courseId: course.id,
         courseTitle: course.title,
-        sessionId: session?.sessionId || null,
-        sessionName: session?.sessionName || null,
+        sessionId: targetSessionId,
+        sessionName: targetSessionName,
         userId: instructor.uid,
         instructorId: instructor.id,
         userName: instructor.name,
@@ -213,32 +267,42 @@ export const RegistrationService = {
       // Update session seats
       let updatedSessions = [...(currentCourse.sessions || [])];
       let enrolledSeats = currentCourse.enrolledSeats || 0;
+      const isMulti = isMultiDayCourse(currentCourse);
 
-      if (regData.sessionId) {
-        let sessionIndex = updatedSessions.findIndex(s => s.sessionId === regData.sessionId);
-        
-        // If session ID not found (orphaned), default to the first session if available
-        if (sessionIndex === -1 && updatedSessions.length > 0) {
-          sessionIndex = 0;
-        }
-
-        if (sessionIndex !== -1 && (updatedSessions[sessionIndex].enrolledSeats || 0) > 0) {
-          updatedSessions[sessionIndex].enrolledSeats -= 1;
-        }
+      if (isMulti) {
+        // Multi-day workshop: cohort enrollment is decremented by 1
+        enrolledSeats = Math.max(0, enrolledSeats - 1);
+        updatedSessions = updatedSessions.map(s => ({
+          ...s,
+          enrolledSeats: Math.max(0, (s.enrolledSeats || 1) - 1)
+        }));
       } else {
-        // Legacy course or single session
-        if (updatedSessions.length > 0 && (updatedSessions[0].enrolledSeats || 0) > 0) {
-          updatedSessions[0].enrolledSeats -= 1;
+        if (regData.sessionId) {
+          let sessionIndex = updatedSessions.findIndex(s => s.sessionId === regData.sessionId);
+          
+          // If session ID not found (orphaned), default to the first session if available
+          if (sessionIndex === -1 && updatedSessions.length > 0) {
+            sessionIndex = 0;
+          }
+
+          if (sessionIndex !== -1 && (updatedSessions[sessionIndex].enrolledSeats || 0) > 0) {
+            updatedSessions[sessionIndex].enrolledSeats -= 1;
+          }
+        } else {
+          // Legacy course or single session
+          if (updatedSessions.length > 0 && (updatedSessions[0].enrolledSeats || 0) > 0) {
+            updatedSessions[0].enrolledSeats -= 1;
+          } else if (enrolledSeats > 0) {
+            enrolledSeats -= 1;
+          }
+        }
+
+        // Maintain consistency of enrolledSeats with sessions
+        if (updatedSessions.length > 0) {
+          enrolledSeats = updatedSessions.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0);
         } else if (enrolledSeats > 0) {
           enrolledSeats -= 1;
         }
-      }
-
-      // Maintain consistency of enrolledSeats with sessions
-      if (updatedSessions.length > 0) {
-        enrolledSeats = updatedSessions.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0);
-      } else if (enrolledSeats > 0) {
-        enrolledSeats -= 1;
       }
 
       // Update total registrations count

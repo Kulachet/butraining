@@ -123,13 +123,19 @@ export const LandingPage: React.FC = () => {
     const course = courses.find(c => c.id === courseId);
     if (!course) return;
 
-    // Phase 1 Guard: Multi-day workshop registration is restricted
-    if (isMultiDayCourse(course)) {
-      toast.error("หลักสูตรแบบหลายวันยังไม่เปิดให้ลงทะเบียนใน Phase 1 (ระบบกำลังเตรียมความพร้อม)");
+    // Duplicate check
+    const isAlreadyReg = userRegistrations.some(r => r.courseId === course.id);
+    if (isAlreadyReg) {
+      toast.error(lang === 'en' ? "You are already registered for this workshop" : "ท่านได้ลงทะเบียนหลักสูตรนี้ไปแล้ว");
       return;
     }
 
-    if (course.sessions && course.sessions.length > 1) {
+    const isMulti = isMultiDayCourse(course);
+    if (isMulti) {
+      // Phase 2A cohort-level registration: Register once for the entire workshop cohort
+      handleFinalRegister(course);
+    } else if (course.sessions && course.sessions.length > 1) {
+      // Single-day course with alternate sessions
       setSelectedCourseForSession(course);
       setSelectedSessionId((course.sessions[0] as any).sessionId || course.sessions[0].id);
     } else {
@@ -144,17 +150,18 @@ export const LandingPage: React.FC = () => {
     try {
       await RegistrationService.registerForCourse(course, instructor!, session);
       
-      toast.success("ลงทะเบียนสำเร็จ! ระบบกำลังส่งคำเชิญลงปฏิทินของคุณ...");
+      const isMulti = isMultiDayCourse(course);
+      toast.success(lang === 'en' ? "Registration successful!" : "ลงทะเบียนสำเร็จเรียบร้อยแล้ว!");
       
-      // Auto-send Calendar Invite via GAS
+      // Auto-send Calendar Invite via GAS using backward-compatible payload contract
       const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
       const formattedGuestName = formatInstructorName(instructor!.name, instructor!.id, instructor!.position);
       const formattedSpeakerName = formatInstructorName(course.instructorName, course.instructorId);
 
-      const locationText = session?.locationDetail || course.locationDetail || "ไม่ระบุ";
-      const dateText = session?.date || course.date;
-      const startText = session?.startTime || course.startTime || "09:00";
-      const endText = session?.endTime || course.endTime || "16:00";
+      const locationText = session?.locationDetail || course.locationDetail || course.sessions?.[0]?.locationDetail || "ไม่ระบุ";
+      const dateText = session?.date || course.date || course.sessions?.[0]?.date || "";
+      const startText = session?.startTime || course.startTime || course.sessions?.[0]?.startTime || "09:00";
+      const endText = session?.endTime || course.endTime || course.sessions?.[0]?.endTime || "16:00";
 
       const payload = {
         courseTitle: course.title,
@@ -180,12 +187,28 @@ export const LandingPage: React.FC = () => {
         body: JSON.stringify(payload)
       })
       .then(() => {
-        // With no-cors, we can't read the JSON response, so we assume success if no network error
-        toast.success("ส่งคำเชิญลงปฏิทินเรียบร้อยแล้ว กรุณาตรวจสอบอีเมล");
+        if (isMulti) {
+          toast.success(
+            lang === 'en'
+              ? "Calendar invite sent for Day 1. (Note: Additional workshop dates must be scheduled manually)"
+              : "ส่งคำเชิญปฏิทินสำหรับวันแรกแล้ว (หมายเหตุ: วันอบรมถัดไปกรุณาบันทึกลงปฏิทินเพิ่มเติม)",
+            { duration: 6000 }
+          );
+        } else {
+          toast.success(
+            lang === 'en' 
+              ? "Calendar invitation sent. Please check your email." 
+              : "ส่งคำเชิญลงปฏิทินเรียบร้อยแล้ว กรุณาตรวจสอบอีเมล"
+          );
+        }
       })
       .catch(err => {
         console.error("Calendar fetch error:", err);
-        toast.error("ไม่สามารถส่งคำเชิญลงปฏิทินได้");
+        toast.error(
+          lang === 'en'
+            ? "Could not send automated Calendar invitation. Your registration remains confirmed."
+            : "ไม่สามารถส่งคำเชิญลงปฏิทินอัตโนมัติได้ (การลงทะเบียนของท่านยังคงสมบูรณ์)"
+        );
       });
 
       setSelectedCourseForSession(null);
@@ -194,9 +217,9 @@ export const LandingPage: React.FC = () => {
       const errorMessage = error.message || "";
       
       if (errorMessage.includes("Already registered")) {
-        toast.error("ท่านได้ลงทะเบียนหลักสูตรนี้ไปแล้ว");
-      } else if (errorMessage.includes("Session is full")) {
-        toast.error("ขออภัย เซสชันนี้เต็มแล้ว");
+        toast.error(lang === 'en' ? "You are already registered for this workshop" : "ท่านได้ลงทะเบียนหลักสูตรนี้ไปแล้ว");
+      } else if (errorMessage.includes("Session is full") || errorMessage.includes("Course is full")) {
+        toast.error(lang === 'en' ? "Sorry, this workshop is full" : "ขออภัย ที่นั่งสำหรับหลักสูตรนี้เต็มแล้ว");
       } else if (errorMessage.includes("permission-denied") || errorMessage.includes("insufficient permissions")) {
         toast.error("ไม่มีสิทธิ์ในการดำเนินการ (Permission Denied) กรุณาติดต่อผู้ดูแลระบบ");
       } else {

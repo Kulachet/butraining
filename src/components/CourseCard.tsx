@@ -169,7 +169,7 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                   <Users className="w-4 h-4 text-crimson" strokeWidth={1.5} />
                 </div>
                 <span className="font-light tracking-wide">
-                  ที่นั่งว่าง: <span className={cn("font-medium", availableSeats <= 5 ? "text-orange-500" : "text-green-600")}>{availableSeats}</span> / {maxSeats}
+                  {lang === 'en' ? "Available Seats:" : "ที่นั่งว่าง:"} <span className={cn("font-medium", availableSeats <= 5 ? "text-orange-500" : "text-green-600")}>{availableSeats}</span> / {maxSeats}
                 </span>
               </div>
             )}
@@ -181,7 +181,7 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                 onClick={() => onEvaluate?.(course.id)}
                 className="w-full md:w-auto px-8 font-medium py-2.5 text-sm rounded-lg transition-all flex items-center justify-center gap-2 tracking-wide bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/20"
               >
-                ทำแบบประเมินผล
+                {lang === 'en' ? "Take Evaluation" : "ทำแบบประเมินผล"}
                 <ArrowRight className="w-4 h-4" strokeWidth={1.5} />
               </button>
             ) : isRegistered ? (
@@ -194,25 +194,11 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                   <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
                 ) : (
                   <>
-                    <span>{t("cancelRegistration") || "ยกเลิกการลงทะเบียน"}</span>
+                    <span>{lang === 'en' ? "Cancel Registration" : (t("cancelRegistration") || "ยกเลิกการลงทะเบียน")}</span>
                     <X className="w-4 h-4" strokeWidth={1.5} />
                   </>
                 )}
               </button>
-            ) : isMulti ? (
-              // Multi-day workshop new registration guarded until downstream workflow is verified
-              <div className="flex flex-col items-end gap-1 w-full md:w-auto">
-                <button
-                  disabled
-                  className="w-full md:w-auto px-6 py-2.5 text-xs rounded-lg flex items-center justify-center gap-2 bg-slate-100 text-slate-500 border border-slate-200 cursor-not-allowed font-medium"
-                >
-                  <Clock className="w-3.5 h-3.5 text-amber-600" />
-                  {t("multiDayRegistrationPending")}
-                </button>
-                <span className="text-[10px] text-slate-400">
-                  {lang === 'en' ? "Multi-day registration is coming soon" : "รอเปิดระบบรับสมัครรอบใหม่"}
-                </span>
-              </div>
             ) : (
               <button
                 onClick={() => {
@@ -235,12 +221,12 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                 ) : (
                   <>
                     {isCompleted 
-                      ? "ปิดรับสมัครแล้ว" 
+                      ? (lang === 'en' ? "Registration Closed" : "ปิดรับสมัครแล้ว")
                       : isRegistered 
-                        ? "ยกเลิกการลงทะเบียน" 
+                        ? (lang === 'en' ? "Cancel Registration" : "ยกเลิกการลงทะเบียน") 
                         : isFull 
-                          ? "ที่นั่งเต็ม" 
-                          : "ลงทะเบียนเข้าร่วม"
+                          ? (lang === 'en' ? "Full" : "ที่นั่งเต็ม") 
+                          : (lang === 'en' ? "Register" : "ลงทะเบียนเข้าร่วม")
                     }
                     {!isCompleted && !isRegistered && !isFull && <ArrowRight className="w-4 h-4" strokeWidth={1.5} />}
                     {isRegistered && !isCompleted && (
