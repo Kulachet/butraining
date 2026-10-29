@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import Papa from "papaparse";
 import toast from "react-hot-toast";
+import { formatInstructorName } from "../lib/utils";
 
 type ActiveTabType = "overview" | "questions" | "feedback" | "comments";
 
@@ -280,7 +281,7 @@ export const EvaluationDashboard: React.FC = () => {
                 <Calendar className="w-4 h-4 text-crimson" /> {selectedCourse.date || "ไม่ระบุวันที่"}
               </span>
               <span className="flex items-center gap-1.5 font-medium text-slate-700">
-                <User className="w-4 h-4 text-slate-400" /> วิทยากร: {selectedCourse.instructorName || "ไม่ระบุ"}
+                <User className="w-4 h-4 text-slate-400" /> วิทยากร: {selectedCourse.instructorName ? formatInstructorName(selectedCourse.instructorName, selectedCourse.instructorId) : "ไม่ระบุ"}
               </span>
               {selectedCourse.category && (
                 <span className="bg-slate-100 px-2.5 py-0.5 rounded-lg text-slate-600 font-medium">

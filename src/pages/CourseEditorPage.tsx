@@ -9,20 +9,21 @@ import {
   Clock, 
   Users, 
   MapPin, 
-  Globe, 
   Trash2, 
-  ChevronDown,
-  Info,
-  AlertCircle,
-  CheckCircle2,
-  Loader2,
-  Image as ImageIcon,
-  Check
+  Info, 
+  AlertCircle, 
+  CheckCircle2, 
+  Loader2, 
+  Image as ImageIcon, 
+  Check, 
+  Plus,
+  AlertTriangle,
+  Lock
 } from "lucide-react";
-import { useForm, Controller, useFieldArray, SubmitHandler } from "react-hook-form";
+import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { Course, Instructor, Session } from "../types";
+import { Course, Instructor, CourseSession } from "../types";
 import { db, auth } from "../lib/firebase";
 import { 
   collection, 
@@ -30,39 +31,29 @@ import {
   doc, 
   getDoc, 
   setDoc, 
-  addDoc, 
-  deleteDoc,
-  serverTimestamp,
-  writeBatch
+  deleteDoc, 
+  serverTimestamp 
 } from "firebase/firestore";
 import { useNavigate, useParams } from "react-router-dom";
 import toast from "react-hot-toast";
-import { cn } from "../lib/utils";
+import { cn, formatInstructorName, formatDateThai, getCourseSessions } from "../lib/utils";
 
-// Custom Checkbox Component
-const Checkbox = ({ checked, onChange, label }: { checked: boolean; onChange: (val: boolean) => void; label: string }) => (
-  <label className="flex items-center gap-3 cursor-pointer group">
-    <div 
-      onClick={() => onChange(!checked)}
-      className={cn(
-        "w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all",
-        checked ? "bg-crimson border-crimson shadow-lg shadow-crimson/20" : "bg-white border-slate-200 group-hover:border-slate-300"
-      )}
-    >
-      {checked && <Check className="w-4 h-4 text-white" />}
-    </div>
-    <span className="text-sm font-bold text-slate-700">{label}</span>
-  </label>
-);
+export interface SessionFormItem {
+  id: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  sessionName?: string;
+}
 
 const schema = z.object({
   title: z.string().min(5, "ชื่อหลักสูตรต้องมีอย่างน้อย 5 ตัวอักษร"),
   academicYear: z.string().min(1, "กรุณาระบุปีการศึกษา"),
   instructorName: z.string().min(1, "กรุณาระบุชื่อวิทยากร"),
   description: z.string().min(10, "กรุณากรอกรายละเอียดหลักสูตร"),
-  date: z.string().min(1, "กรุณาระบุวันที่"),
-  startTime: z.string().min(1, "กรุณาระบุเวลาเริ่ม"),
-  endTime: z.string().min(1, "กรุณาระบุเวลาสิ้นสุด"),
+  date: z.string().optional(),
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
   locationDetail: z.string().min(1, "กรุณาระบุสถานที่"),
   maxSeats: z.number().min(1, "จำนวนที่รับต้องมากกว่า 0"),
   status: z.enum(["Active", "Inactive"]),
@@ -84,6 +75,12 @@ export const CourseEditorPage: React.FC = () => {
   const [instructors, setInstructors] = useState<Instructor[]>([]);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showUnsavedModal, setShowUnsavedModal] = useState(false);
+  const [existingRegistrationsCount, setExistingRegistrationsCount] = useState<number>(0);
+
+  // Training Schedule Sessions State
+  const [sessions, setSessions] = useState<SessionFormItem[]>([]);
+  const [sessionsInitial, setSessionsInitial] = useState<string>("");
 
   useEffect(() => {
     const fetchInstructors = async () => {
@@ -98,15 +95,12 @@ export const CourseEditorPage: React.FC = () => {
     fetchInstructors();
   }, []);
 
-  const { register, handleSubmit, control, watch, setValue, formState: { errors, isDirty } } = useForm<FormData>({
+  const { register, handleSubmit, watch, setValue, formState: { errors, isDirty } } = useForm<FormData>({
     resolver: zodResolver(schema),
     defaultValues: {
       status: "Active",
       isVisible: true,
       academicYear: "2568",
-      date: new Date().toISOString().split('T')[0],
-      startTime: "09:00",
-      endTime: "12:00",
       maxSeats: 40,
       locationDetail: "",
     }
@@ -116,31 +110,57 @@ export const CourseEditorPage: React.FC = () => {
   const watchBannerImageBase64 = watch("bannerImageBase64");
   const watchIsVisible = watch("isVisible");
 
+  // Track if sessions have changed from initial load
+  const isSessionsDirty = JSON.stringify(sessions) !== sessionsInitial;
+  const isMultiDay = sessions.length > 1;
+
   useEffect(() => {
     const fetchData = async () => {
       try {
         if (isEdit) {
           const courseSnap = await getDoc(doc(db, "courses", id));
           if (courseSnap.exists()) {
-            const data = courseSnap.data();
-            // Map legacy sessions to flat fields if necessary
-            if (data.sessions && data.sessions.length > 0) {
-              const firstSession = data.sessions[0];
-              setValue("date", firstSession.date);
-              setValue("startTime", firstSession.startTime);
-              setValue("endTime", firstSession.endTime);
-              setValue("locationDetail", firstSession.locationDetail);
-              setValue("maxSeats", firstSession.maxSeats);
-            }
+            const data = { id: courseSnap.id, ...courseSnap.data() } as Course;
+            
+            // Check existing registrations
+            const totalRegs = data.totalRegistrations || data.enrolledSeats || 0;
+            setExistingRegistrationsCount(totalRegs);
+
+            // Populate sessions using centralized getCourseSessions
+            const loadedSessions = getCourseSessions(data);
+            const initialFormSessions: SessionFormItem[] = loadedSessions.map((s, idx) => ({
+              id: s.id || `session_${idx + 1}`,
+              date: s.date || "",
+              startTime: s.startTime || "09:00",
+              endTime: s.endTime || "12:00",
+              sessionName: s.sessionName || `วันที่ ${idx + 1}`,
+            }));
+            
+            setSessions(initialFormSessions);
+            setSessionsInitial(JSON.stringify(initialFormSessions));
+
+            // Populate form values
             Object.keys(data).forEach((key) => {
               if (key !== "sessions") {
-                setValue(key as any, data[key]);
+                setValue(key as any, (data as any)[key]);
               }
             });
           } else {
             toast.error("ไม่พบข้อมูลหลักสูตร");
             navigate("/admin");
           }
+        } else {
+          // New Course: Initialize with 1 default session
+          const todayStr = new Date().toISOString().split('T')[0];
+          const defaultSession: SessionFormItem = {
+            id: crypto.randomUUID(),
+            date: todayStr,
+            startTime: "09:00",
+            endTime: "12:00",
+            sessionName: "วันที่ 1",
+          };
+          setSessions([defaultSession]);
+          setSessionsInitial(JSON.stringify([defaultSession]));
         }
       } catch (error) {
         console.error("Error fetching data:", error);
@@ -152,11 +172,73 @@ export const CourseEditorPage: React.FC = () => {
     fetchData();
   }, [id, isEdit, setValue, navigate]);
 
+  // Session Handlers
+  const handleAddSession = () => {
+    let nextDate = new Date().toISOString().split('T')[0];
+    let nextStartTime = "09:00";
+    let nextEndTime = "12:00";
+
+    if (sessions.length > 0) {
+      const lastSession = sessions[sessions.length - 1];
+      nextStartTime = lastSession.startTime || "09:00";
+      nextEndTime = lastSession.endTime || "12:00";
+      if (lastSession.date) {
+        try {
+          const parts = lastSession.date.split("-").map(Number);
+          if (parts.length === 3) {
+            const d = new Date(parts[0], parts[1] - 1, parts[2] + 1);
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, "0");
+            const day = String(d.getDate()).padStart(2, "0");
+            nextDate = `${y}-${m}-${day}`;
+          }
+        } catch {
+          // fallback to today
+        }
+      }
+    }
+
+    const newSession: SessionFormItem = {
+      id: crypto.randomUUID(),
+      date: nextDate,
+      startTime: nextStartTime,
+      endTime: nextEndTime,
+      sessionName: `วันที่ ${sessions.length + 1}`,
+    };
+
+    const updated = [...sessions, newSession];
+    setSessions(updated);
+    toast.success(`เพิ่มวันอบรมที่ ${updated.length} แล้ว`);
+  };
+
+  const handleRemoveSession = (sessionId: string) => {
+    if (sessions.length <= 1) {
+      toast.error("ต้องมีวันอบรมอย่างน้อย 1 วัน");
+      return;
+    }
+    const updated = sessions.filter(s => s.id !== sessionId);
+    setSessions(updated);
+    toast.success("ลบวันอบรมเรียบร้อยแล้ว");
+  };
+
+  const handleUpdateSession = (sessionId: string, field: "date" | "startTime" | "endTime", value: string) => {
+    setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, [field]: value } : s));
+  };
+
+  const handleSortSessionsChronologically = () => {
+    const sorted = [...sessions].sort((a, b) => {
+      const dateCmp = (a.date || "").localeCompare(b.date || "");
+      if (dateCmp !== 0) return dateCmp;
+      return (a.startTime || "").localeCompare(b.startTime || "");
+    });
+    setSessions(sorted);
+    toast.success("จัดเรียงลำดับวันอบรมตามวันที่เรียบร้อย");
+  };
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Check authentication
     if (!auth.currentUser) {
       toast.error("กรุณาเข้าสู่ระบบก่อนอัปโหลดรูปภาพ");
       return;
@@ -166,7 +248,6 @@ export const CourseEditorPage: React.FC = () => {
     toast.loading("กำลังประมวลผลรูปภาพ...", { id: "upload-toast" });
 
     try {
-      // 1. Compress Image using Canvas
       const compressImage = (file: File): Promise<string> => {
         return new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -198,7 +279,6 @@ export const CourseEditorPage: React.FC = () => {
               const ctx = canvas.getContext('2d');
               ctx?.drawImage(img, 0, 0, width, height);
               
-              // Convert to Base64 with 0.7 quality to keep it small
               const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
               resolve(dataUrl);
             };
@@ -212,7 +292,6 @@ export const CourseEditorPage: React.FC = () => {
       const base64Image = await compressImage(file);
       
       setUploadProgress(80);
-      // Directly set the base64 string to the form
       setValue("bannerImageBase64", base64Image, { shouldDirty: true });
       
       toast.success("ประมวลผลรูปภาพสำเร็จ", { id: "upload-toast" });
@@ -226,11 +305,68 @@ export const CourseEditorPage: React.FC = () => {
     }
   };
 
+  // Validation function
+  const validateSessions = (): boolean => {
+    if (sessions.length === 0) {
+      toast.error("ต้องมีกำหนดการอบรมอย่างน้อย 1 วัน");
+      return false;
+    }
+
+    for (let i = 0; i < sessions.length; i++) {
+      const s = sessions[i];
+      if (!s.date) {
+        toast.error(`กรุณาระบุวันที่จัดอบรมสำหรับวันที่ ${i + 1}`);
+        return false;
+      }
+      if (!s.startTime) {
+        toast.error(`กรุณาระบุเวลาเริ่มสำหรับวันที่ ${i + 1}`);
+        return false;
+      }
+      if (!s.endTime) {
+        toast.error(`กรุณาระบุเวลาสิ้นสุดสำหรับวันที่ ${i + 1}`);
+        return false;
+      }
+      if (s.endTime <= s.startTime) {
+        toast.error(`เวลาสิ้นสุดต้องอยู่หลังเวลาเริ่ม ในวันที่ ${i + 1} (${s.startTime} - ${s.endTime})`);
+        return false;
+      }
+    }
+
+    // Duplicate and overlapping time check
+    for (let i = 0; i < sessions.length; i++) {
+      for (let j = i + 1; j < sessions.length; j++) {
+        const s1 = sessions[i];
+        const s2 = sessions[j];
+        if (s1.date === s2.date) {
+          if (s1.startTime === s2.startTime && s1.endTime === s2.endTime) {
+            toast.error(`พบวันและเวลาอบรมที่ซ้ำซ้อนกันในวันที่ ${formatDateThai(s1.date)}`);
+            return false;
+          }
+          if (s1.startTime < s2.endTime && s2.startTime < s1.endTime) {
+            toast.error(`พบช่วงเวลาอบรมที่คาบเกี่ยวกันในวันที่ ${formatDateThai(s1.date)}`);
+            return false;
+          }
+        }
+      }
+    }
+
+    return true;
+  };
+
+  const handleCancelClick = () => {
+    if (isDirty || isSessionsDirty) {
+      setShowUnsavedModal(true);
+    } else {
+      navigate("/admin");
+    }
+  };
+
   const onSubmit = async (data: FormData) => {
+    if (!validateSessions()) return;
+
     setSaving(true);
     try {
       let existingEnrolledSeats = 0;
-      let existingSessionId = crypto.randomUUID();
       
       if (isEdit) {
         const courseSnap = await getDoc(doc(db, "courses", id));
@@ -238,34 +374,48 @@ export const CourseEditorPage: React.FC = () => {
           const existingData = courseSnap.data();
           if (existingData.sessions && existingData.sessions.length > 0) {
             existingEnrolledSeats = existingData.sessions[0].enrolledSeats || 0;
-            existingSessionId = existingData.sessions[0].sessionId || existingSessionId;
           } else {
             existingEnrolledSeats = existingData.enrolledSeats || 0;
           }
           
-          // Fallback to totalRegistrations if it's greater
           if (existingData.totalRegistrations && existingData.totalRegistrations > existingEnrolledSeats) {
             existingEnrolledSeats = existingData.totalRegistrations;
           }
         }
       }
 
-      // Construct legacy session object for compatibility
-      const session: Session = {
-        sessionId: existingSessionId,
-        sessionName: "Main Session",
-        date: data.date,
-        startTime: data.startTime,
-        endTime: data.endTime,
+      // Sort sessions chronologically for storage
+      const sorted = [...sessions].sort((a, b) => {
+        const dateCmp = (a.date || "").localeCompare(b.date || "");
+        if (dateCmp !== 0) return dateCmp;
+        return (a.startTime || "").localeCompare(b.startTime || "");
+      });
+
+      const multiDay = sorted.length > 1;
+
+      // Construct sessions array with both id and sessionId for 100% backward compatibility
+      const finalSessions: CourseSession[] = sorted.map((s, idx) => ({
+        id: s.id,
+        sessionId: s.id,
+        sessionName: `วันที่ ${idx + 1}`,
+        date: s.date,
+        startTime: s.startTime,
+        endTime: s.endTime,
         locationType: "On-site",
         locationDetail: data.locationDetail,
         maxSeats: data.maxSeats,
         enrolledSeats: existingEnrolledSeats,
-      };
+      }));
 
       const courseData: any = {
         ...data,
-        sessions: [session],
+        date: sorted[0].date,
+        startTime: sorted[0].startTime,
+        endTime: sorted[0].endTime,
+        sessions: finalSessions,
+        isMultiDay: multiDay,
+        multiDayPublicationBlocked: false,
+        isVisible: data.isVisible,
         updatedAt: serverTimestamp(),
       };
 
@@ -324,26 +474,36 @@ export const CourseEditorPage: React.FC = () => {
           <div className="flex justify-between h-20 items-center">
             <div className="flex items-center gap-4">
               <button 
-                onClick={() => navigate("/admin")}
+                onClick={handleCancelClick}
                 className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+                title="ย้อนกลับ"
               >
                 <ArrowLeft className="w-6 h-6 text-slate-400" />
               </button>
-              <h1 className="text-2xl font-black text-slate-900 tracking-tight font-sans">
-                {isEdit ? "แก้ไขหลักสูตร" : "สร้างหลักสูตรใหม่"}
-              </h1>
+              <div>
+                <h1 className="text-2xl font-black text-slate-900 tracking-tight font-sans">
+                  {isEdit ? "แก้ไขหลักสูตร" : "สร้างหลักสูตรใหม่"}
+                </h1>
+                {isMultiDay && (
+                  <span className="text-[11px] font-bold text-amber-600 bg-amber-50 px-2.5 py-0.5 rounded-full border border-amber-200">
+                    กำหนดการหลายวัน ({sessions.length} วัน) - Phase 1
+                  </span>
+                )}
+              </div>
             </div>
             
             <div className="flex items-center gap-3">
               <button 
-                onClick={() => navigate("/admin")}
+                type="button"
+                onClick={handleCancelClick}
                 className="px-6 py-2.5 text-sm font-bold text-slate-500 hover:text-slate-700 transition-colors"
               >
                 Cancel
               </button>
               <button 
+                type="button"
                 onClick={handleSubmit(onSubmit)}
-                disabled={saving || !isDirty}
+                disabled={saving || (!isDirty && !isSessionsDirty)}
                 className="bg-crimson hover:bg-crimson-dark text-white text-sm font-bold px-8 py-2.5 rounded-xl shadow-lg shadow-crimson/20 transition-all flex items-center gap-2 disabled:opacity-50"
               >
                 {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
@@ -360,14 +520,14 @@ export const CourseEditorPage: React.FC = () => {
           animate={{ opacity: 1, y: 0 }}
           className="bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
         >
-          <div className="p-12">
+          <div className="p-8 sm:p-12">
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
               {/* Left Column: Form Fields */}
               <div className="lg:col-span-2 space-y-8">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                  {/* Row 1 */}
+                  {/* Row 1: Title & Academic Year */}
                   <div className="md:col-span-3 space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ชื่อหลักสูตร</label>
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ชื่อหลักสูตร *</label>
                     <input 
                       {...register("title")}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium"
@@ -376,17 +536,17 @@ export const CourseEditorPage: React.FC = () => {
                     {errors.title && <p className="text-red-500 text-xs mt-1">{errors.title.message}</p>}
                   </div>
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ปีการศึกษา</label>
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ปีการศึกษา *</label>
                     <input 
                       {...register("academicYear")}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium"
-                      placeholder="2567"
+                      placeholder="2568"
                     />
                   </div>
 
-                  {/* Row 2 */}
+                  {/* Row 2: Instructor, Location, Capacity, Status */}
                   <div className="md:col-span-2 space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">วิทยากร</label>
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">วิทยากร *</label>
                     <input 
                       {...register("instructorName")}
                       list="instructors-list"
@@ -395,55 +555,35 @@ export const CourseEditorPage: React.FC = () => {
                     />
                     <datalist id="instructors-list">
                       {instructors.map(inst => (
-                        <option key={inst.id} value={inst.name} />
+                        <option key={inst.id} value={formatInstructorName(inst.name, inst.id, inst.position)} />
                       ))}
                     </datalist>
+                    {errors.instructorName && <p className="text-red-500 text-xs mt-1">{errors.instructorName.message}</p>}
                   </div>
+
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ห้อง / สถานที่</label>
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ห้อง / สถานที่ *</label>
                     <input 
                       {...register("locationDetail")}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium"
                       placeholder="เช่น C6-505"
                     />
+                    {errors.locationDetail && <p className="text-red-500 text-xs mt-1">{errors.locationDetail.message}</p>}
                   </div>
+
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">จำนวนที่รับ (ท่าน)</label>
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">จำนวนที่รับ (ท่าน) *</label>
                     <input 
                       type="number"
                       {...register("maxSeats", { valueAsNumber: true })}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium"
                       placeholder="40"
                     />
+                    {errors.maxSeats && <p className="text-red-500 text-xs mt-1">{errors.maxSeats.message}</p>}
                   </div>
 
-                  {/* Row 3 */}
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">วันที่จัดอบรม</label>
-                    <input 
-                      type="date"
-                      {...register("date")}
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">เวลาเริ่ม</label>
-                    <input 
-                      type="time"
-                      {...register("startTime")}
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">เวลาสิ้นสุด</label>
-                    <input 
-                      type="time"
-                      {...register("endTime")}
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">สถานะ</label>
+                  <div className="md:col-span-2 space-y-2">
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">สถานะหลักสูตร</label>
                     <select 
                       {...register("status")}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium appearance-none"
@@ -454,25 +594,188 @@ export const CourseEditorPage: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">รายละเอียดหลักสูตร</label>
+                {/* Training Schedule Section (กำหนดการอบรม) */}
+                <div className="space-y-4 pt-6 border-t border-slate-100">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Calendar className="w-5 h-5 text-crimson" />
+                        <h3 className="text-base font-bold text-slate-800">
+                          กำหนดการอบรม (Training Schedule)
+                        </h3>
+                        {isMultiDay && (
+                          <span className="text-[11px] font-bold bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-full">
+                            {sessions.length} วันอบรม (Multi-day)
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-500 font-light mt-1">
+                        รองรับทั้งการอบรมวันเดียว และการอบรมหลายวัน (วันที่ต่อเนื่องหรือไม่ต่อเนื่อง และเวลาเริ่ม-สิ้นสุดแตกต่างกันได้)
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {sessions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={handleSortSessionsChronologically}
+                          className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-600 rounded-xl text-xs font-medium border border-slate-200 transition-colors"
+                          title="จัดเรียงตามลำดับวันที่"
+                        >
+                          จัดเรียงตามวันที่
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleAddSession}
+                        className="inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-crimson text-white hover:bg-crimson-dark rounded-xl text-xs font-bold transition-all shadow-md shadow-crimson/10"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        + เพิ่มวันอบรม
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Existing Registrations Notice */}
+                  {existingRegistrationsCount > 0 && (
+                    <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-3">
+                      <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                      <div className="text-xs text-amber-900 space-y-1">
+                        <p className="font-bold">หลักสูตรนี้มีผู้ลงทะเบียนแล้ว {existingRegistrationsCount} ท่าน</p>
+                        <p className="font-light">
+                          การแก้ไขหรือลบวันอบรมที่มีอยู่แล้วอาจส่งผลกระทบต่อกำหนดการของผู้เข้าอบรม โปรดตรวจสอบความถูกต้องและแจ้งเตือนผู้เข้าอบรมล่วงหน้า
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Multi-day Phase 1 Restriction Notice */}
+                  {isMultiDay && (
+                    <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl flex items-start gap-3">
+                      <Info className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                      <div className="text-xs text-blue-900 space-y-1">
+                        <p className="font-bold">หลักสูตรแบบหลายวัน (Phase 1: Schedule Editor & Display)</p>
+                        <p className="font-light">
+                          ท่านสามารถกำหนดวันอบรมและบันทึกข้อมูลได้ตามปกติ แต่ระบบจะจำกัดการเผยแพร่สู่สาธารณะ (Public) ไว้ชั่วคราว เพื่อความปลอดภัยของข้อมูล จนกว่าระบบลงทะเบียนและเช็คอินแบบหลายวัน (Phase 2) จะเสร็จสมบูรณ์
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sessions List */}
+                  <div className="space-y-3">
+                    {sessions.map((session, index) => {
+                      const isTimeInvalid = session.startTime && session.endTime && session.endTime <= session.startTime;
+                      return (
+                        <div 
+                          key={session.id}
+                          className="p-4 bg-white border border-slate-200 rounded-2xl transition-all hover:border-slate-300 shadow-sm"
+                        >
+                          <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
+                            <div className="flex items-center gap-2">
+                              <span className="w-6 h-6 rounded-lg bg-crimson text-white text-xs font-bold flex items-center justify-center">
+                                {index + 1}
+                              </span>
+                              <span className="text-xs font-bold text-slate-800">
+                                วันที่ {index + 1} {session.date ? `(${formatDateThai(session.date)})` : ""}
+                              </span>
+                            </div>
+
+                            {sessions.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveSession(session.id)}
+                                className="text-slate-400 hover:text-red-500 p-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs"
+                                title="ลบวันอบรมนี้"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span className="text-[11px] font-medium hidden sm:inline">ลบวันอบรม</span>
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                                <Calendar className="w-3 h-3 text-crimson" /> วันที่จัดอบรม *
+                              </label>
+                              <input
+                                type="date"
+                                value={session.date}
+                                onChange={(e) => handleUpdateSession(session.id, "date", e.target.value)}
+                                className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-crimson outline-none font-medium text-slate-800"
+                                required
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-crimson" /> เวลาเริ่ม *
+                              </label>
+                              <input
+                                type="time"
+                                value={session.startTime}
+                                onChange={(e) => handleUpdateSession(session.id, "startTime", e.target.value)}
+                                className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-crimson outline-none font-medium text-slate-800"
+                                required
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-crimson" /> เวลาสิ้นสุด *
+                              </label>
+                              <input
+                                type="time"
+                                value={session.endTime}
+                                onChange={(e) => handleUpdateSession(session.id, "endTime", e.target.value)}
+                                className={cn(
+                                  "w-full px-3 py-2.5 bg-slate-50 border rounded-xl text-sm focus:ring-2 outline-none font-medium text-slate-800",
+                                  isTimeInvalid ? "border-red-400 focus:ring-red-400 bg-red-50/50" : "border-slate-200 focus:ring-crimson"
+                                )}
+                                required
+                              />
+                            </div>
+                          </div>
+
+                          {isTimeInvalid && (
+                            <p className="text-red-500 text-xs mt-2 flex items-center gap-1 font-medium">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                              เวลาสิ้นสุด ({session.endTime}) ต้องอยู่หลังเวลาเริ่ม ({session.startTime})
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="space-y-2 pt-2">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">รายละเอียดหลักสูตร *</label>
                   <textarea 
                     {...register("description")}
                     rows={6}
                     className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-crimson outline-none transition-all font-medium resize-none"
                     placeholder="อธิบายรายละเอียดหลักสูตร วัตถุประสงค์ และสิ่งที่จะได้รับ..."
                   />
+                  {errors.description && <p className="text-red-500 text-xs mt-1">{errors.description.message}</p>}
                 </div>
 
+                {/* Visibility Toggle */}
                 <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
                   <div className="flex items-center gap-2">
                     <input 
                       type="checkbox"
                       id="isVisible"
                       {...register("isVisible")}
-                      className="w-5 h-5 rounded border-slate-300 text-crimson focus:ring-crimson"
+                      className="w-5 h-5 rounded border-slate-300 text-crimson focus:ring-crimson cursor-pointer"
                     />
-                    <label htmlFor="isVisible" className="text-sm font-bold text-slate-700">แสดงผลบนหน้าหลัก (Public)</label>
+                    <label 
+                      htmlFor="isVisible" 
+                      className="text-sm font-bold text-slate-700 cursor-pointer"
+                    >
+                      แสดงผลบนหน้าหลัก (Public)
+                    </label>
                   </div>
                   <div className="ml-auto flex items-center gap-2 text-slate-400">
                     <Info className="w-4 h-4" />
@@ -560,14 +863,15 @@ export const CourseEditorPage: React.FC = () => {
             <div className="flex flex-col sm:flex-row gap-4 pt-12 border-t border-slate-100 mt-12">
               <button 
                 type="button"
-                onClick={() => navigate("/admin")}
+                onClick={handleCancelClick}
                 className="flex-1 px-8 py-4 bg-white border border-slate-200 text-slate-600 font-bold rounded-2xl hover:bg-slate-50 transition-all"
               >
                 ยกเลิก
               </button>
               <button 
+                type="button"
                 onClick={handleSubmit(onSubmit)}
-                disabled={saving}
+                disabled={saving || (!isDirty && !isSessionsDirty)}
                 className="flex-1 px-8 py-4 bg-crimson hover:bg-crimson-dark text-white font-bold rounded-2xl shadow-xl shadow-crimson/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
               >
                 {saving ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
@@ -580,6 +884,7 @@ export const CourseEditorPage: React.FC = () => {
         {isEdit && (
           <div className="mt-12 text-center">
             <button 
+              type="button"
               onClick={() => setShowDeleteConfirm(true)}
               className="text-red-400 hover:text-red-600 font-bold text-sm transition-colors flex items-center gap-2 mx-auto"
             >
@@ -589,6 +894,51 @@ export const CourseEditorPage: React.FC = () => {
           </div>
         )}
       </main>
+
+      {/* Unsaved Changes Confirmation Modal */}
+      <AnimatePresence>
+        {showUnsavedModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowUnsavedModal(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-white rounded-[2rem] shadow-2xl p-8 max-w-md w-full text-center"
+            >
+              <div className="w-16 h-16 bg-amber-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <AlertTriangle className="w-8 h-8 text-amber-500" />
+              </div>
+              <h3 className="text-xl font-bold text-slate-900 mb-2">ยกเลิกการแก้ไขหรือไม่?</h3>
+              <p className="text-slate-500 text-sm mb-6 leading-relaxed font-light">
+                คุณมีข้อมูลที่ยังไม่ได้บันทึก หากออกจากหน้านี้ การแก้ไขทั้งหมดจะไม่ถูกบันทึก
+              </p>
+              <div className="flex flex-col gap-2.5">
+                <button 
+                  type="button"
+                  onClick={() => navigate("/admin")}
+                  className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3.5 rounded-xl transition-all text-sm"
+                >
+                  ออกจากหน้านี้โดยไม่บันทึก
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => setShowUnsavedModal(false)}
+                  className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3.5 rounded-xl transition-all text-sm"
+                >
+                  แก้ไขต่อ
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Delete Confirmation Modal */}
       <AnimatePresence>
@@ -616,12 +966,14 @@ export const CourseEditorPage: React.FC = () => {
               </p>
               <div className="flex flex-col gap-3">
                 <button 
+                  type="button"
                   onClick={handleDelete}
                   className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl transition-all"
                 >
                   Yes, Delete Permanently
                 </button>
                 <button 
+                  type="button"
                   onClick={() => setShowDeleteConfirm(false)}
                   className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-4 rounded-2xl transition-all"
                 >

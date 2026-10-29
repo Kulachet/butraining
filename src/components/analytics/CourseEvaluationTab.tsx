@@ -3,6 +3,7 @@ import { AnalyticsData, QUESTIONS, getScoreLevel, getRatingsArray } from "./type
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Cell, Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis } from "recharts";
 import { BookOpen, Star, AlertTriangle, Filter } from "lucide-react";
 import { format, parseISO } from "date-fns";
+import { formatInstructorName } from "../../lib/utils";
 
 export const CourseEvaluationTab: React.FC<{ data: AnalyticsData }> = ({ data }) => {
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
@@ -63,7 +64,7 @@ export const CourseEvaluationTab: React.FC<{ data: AnalyticsData }> = ({ data })
         id: course.id,
         title: course.title,
         date: course.date,
-        instructor: course.instructorName || "-",
+        instructor: course.instructorName ? formatInstructorName(course.instructorName, course.instructorId) : "-",
         registrations: courseRegs.length,
         attended: attended.length,
         completionRate: Number(completionRate.toFixed(1)),

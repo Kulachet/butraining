@@ -2,6 +2,7 @@ import React from "react";
 import { Course } from "../../types";
 import { EvaluationAnalysisResult } from "../../lib/evaluationAnalytics";
 import { PDF_COLORS } from "./OverviewPdfReport";
+import { formatInstructorName } from "../../lib/utils";
 
 interface EvaluationPdfReportProps {
   course: Course;
@@ -88,7 +89,7 @@ export const EvaluationPdfReport: React.FC<EvaluationPdfReportProps> = ({
               style={{ color: PDF_COLORS.textMuted }}
             >
               <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>วันที่จัดอบรม:</span> {course.date || "ไม่ระบุ"}</p>
-              <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>วิทยากร:</span> {course.instructorName || "ไม่ระบุ"}</p>
+              <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>วิทยากร:</span> {course.instructorName ? formatInstructorName(course.instructorName, course.instructorId) : "ไม่ระบุ"}</p>
               <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>วันที่จัดทำรายงาน:</span> {currentDateStr}</p>
             </div>
           </div>

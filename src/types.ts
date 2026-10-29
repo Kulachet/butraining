@@ -1,15 +1,31 @@
 export interface Instructor {
   uid?: string;
-  id: string; // Instructor ID from CSV
+  firebaseId?: string;
+  id: string; // Instructor ID (e.g. A67013)
   name: string;
   email: string;
   position?: string;
   department: string;
   createdAt?: string;
   updatedAt?: string;
+  isManual?: boolean;
+}
+
+export interface CourseSession {
+  id: string;
+  sessionId?: string;
+  sessionName?: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  locationType?: 'On-site' | 'Online';
+  locationDetail?: string;
+  maxSeats?: number;
+  enrolledSeats?: number;
 }
 
 export interface Session {
+  id?: string;
   sessionId: string;
   sessionName: string;
   date: string;
@@ -39,7 +55,9 @@ export interface Course {
   archivedAt?: any;
   archivedBy?: string;
   archivedByEmail?: string;
-  sessions: Session[];
+  sessions?: CourseSession[];
+  isMultiDay?: boolean;
+  multiDayPublicationBlocked?: boolean;
   totalRegistrations?: number;
   maxSeats?: number;
   enrolledSeats?: number;
@@ -49,6 +67,14 @@ export interface Course {
   department?: string;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface SessionAttendance {
+  attended: boolean;
+  checkInAt?: string;
+  checkInSequenceNumber?: number;
+  sessionDate?: string;
+  sessionName?: string;
 }
 
 export interface Registration {
@@ -67,6 +93,7 @@ export interface Registration {
   checkInSequenceNumber?: number;
   checkInAt?: string;
   attended: boolean;
+  attendedSessions?: Record<string, SessionAttendance>;
   registeredAt: string;
   certStatus?: 'pending' | 'sent' | 'failed';
   certSentAt?: string;

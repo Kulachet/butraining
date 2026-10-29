@@ -13,6 +13,7 @@ import { ProfilePage } from "./pages/ProfilePage";
 import { CheckinPage } from "./pages/CheckinPage";
 import { EvaluatePage } from "./pages/EvaluatePage";
 import { Toaster } from "react-hot-toast";
+import { LanguageProvider } from "./contexts/LanguageContext";
 
 const AppContent = () => {
   const { user, loading } = useAuth();
@@ -40,6 +41,7 @@ const AppContent = () => {
           <Route path="/admin/course/edit/:id" element={<CourseEditorPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/checkin/:courseId" element={<CheckinPage />} />
+          <Route path="/checkin/:courseId/:sessionId" element={<CheckinPage />} />
           <Route path="/evaluate/:courseId" element={<EvaluatePage />} />
           {/* Add more routes as needed */}
           <Route path="*" element={<Navigate to="/" />} />
@@ -60,10 +62,12 @@ const AppContent = () => {
 export default function App() {
   return (
     <AuthProvider>
-      <Router>
-        <Toaster position="top-right" />
-        <AppContent />
-      </Router>
+      <LanguageProvider>
+        <Router>
+          <Toaster position="top-right" />
+          <AppContent />
+        </Router>
+      </LanguageProvider>
     </AuthProvider>
   );
 }

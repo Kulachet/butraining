@@ -60,8 +60,9 @@ service cloud.firestore {
 
     match /instructors/{instructorId} {
       allow read: if isAuthenticated();
-      allow create: if (isOwner(instructorId) || isRequestOwner()) && isValidInstructor(request.resource.data);
-      allow update: if (isOwner(instructorId) || isDocOwner() || (isAuthenticated() && resource.data.email == request.auth.token.email)) && isValidInstructor(request.resource.data);
+      allow create: if (isAdmin() || isOwner(instructorId) || isRequestOwner()) && isValidInstructor(request.resource.data);
+      allow update: if (isAdmin() || isOwner(instructorId) || isDocOwner() || (isAuthenticated() && resource.data.email == request.auth.token.email)) && isValidInstructor(request.resource.data);
+      allow delete: if isAdmin();
     }
 
     match /courses/{courseId} {
@@ -78,11 +79,11 @@ service cloud.firestore {
     match /registrations/{regId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidRegistration(request.resource.data);
-      // แก้ไข: อนุญาตให้ User เจ้าของรายการ สามารถอัปเดต 'attended', 'checkInAt' และ 'checkInSequenceNumber' เพื่อเช็คอินได้
+      // แก้ไข: อนุญาตให้ User เจ้าของรายการ สามารถอัปเดต 'attended', 'checkInAt', 'checkInSequenceNumber' และ 'attendedSessions' เพื่อเช็คอินได้
       allow update: if isAdmin() || (
         isAuthenticated() && 
         resource.data.userId == request.auth.uid && 
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attended', 'checkInAt', 'checkInSequenceNumber'])
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attended', 'checkInAt', 'checkInSequenceNumber', 'attendedSessions'])
       );
       // แก้ไข: อนุญาตให้ User สามารถกดยกเลิกการลงทะเบียนของตัวเองได้
       allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);

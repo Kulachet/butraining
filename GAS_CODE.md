@@ -1,11 +1,12 @@
 # Google Apps Script สำหรับระบบ LDO (BU Training)
 
-กรุณาคัดลอกโค้ดด้านล่างนี้ไปวางในเครื่องมือแก้ไข Google Apps Script ของคุณ
+กรุณาคัดลอกโค้ดด้านล่างนี้ไปวางในเครื่องมือแก้ไข Google Apps Script ของคุณ เพื่อให้ระบบส่งอีเมล (คำเชิญปฏิทิน, เกียรติบัตร, การแจ้งเตือน และแบบประเมินผล) ใช้คำนำหน้าชื่อผู้รับตามรหัสอาจารย์ (อ., ผศ., รศ., ศ., ดร. หรือ คุณ) อย่างถูกต้องและสม่ำเสมอทั้งแบบข้อความธรรมดา (Plain Text) และ HTML
 
 ```javascript
 /**
  * ระบบจัดการ LDO - Google Apps Script
  * รองรับการส่งอีเมลแจ้งเตือน, ประกาศนียบัตร, ลิงก์ประเมินผล และการเชิญปฏิทิน
+ * จัดการคำนำหน้าชื่อผู้รับ (เรียน อ., เรียน ผศ., เรียน ดร., เรียน คุณ) อัตโนมัติตามข้อมูลอาจารย์
  */
 
 function doPost(e) {
@@ -22,7 +23,7 @@ function doPost(e) {
     } else if (action === "validate_folder") {
       return validateFolder(data.folderId);
     } else {
-      // ตรรกะการเชิญปฏิทิน (ส่งจากหน้าลงทะเบียน)
+      // ตรรกะการเชิญปฏิทินและยืนยันการลงทะเบียน (ส่งจากหน้าลงทะเบียน)
       return handleCalendarInvite(data);
     }
   } catch (err) {
@@ -31,15 +32,22 @@ function doPost(e) {
   }
 }
 
-// 1. จัดการคำเชิญในปฏิทิน (ส่งเมื่อมีการลงทะเบียน)
+// 1. จัดการคำเชิญในปฏิทินและอีเมลยืนยันการลงทะเบียน
 function handleCalendarInvite(data) {
   var guestEmail = data.guestEmail;
   var title = data.courseTitle;
-  var description = data.description;
-  var location = data.location;
+  var description = data.description || "";
+  var location = data.location || "ไม่ระบุ";
   var dateStr = data.date; // "YYYY-MM-DD"
   var startTime = data.startTime || "09:00";
   var endTime = data.endTime || "16:00";
+  var speakerName = data.instructorName || "";
+
+  // คำนวณชื่อผู้รับ (ผู้ลงทะเบียน) ที่จัดรูปแบบแล้ว (รองรับ guestName, recipientName, name)
+  var recipientName = data.guestName || data.recipientName || data.name || "อาจารย์";
+  if (recipientName.indexOf("เรียน ") === 0) {
+    recipientName = recipientName.substring(5).trim();
+  }
 
   // สร้างวัตถุวันที่ (Timezone กรุงเทพ +0700)
   var startDate = new Date(dateStr + 'T' + startTime + ':00+07:00');
@@ -48,7 +56,7 @@ function handleCalendarInvite(data) {
   // สร้างเหตุการณ์ในปฏิทิน
   var calendar = CalendarApp.getDefaultCalendar();
   var event = calendar.createEvent(title, startDate, endDate, {
-    description: description,
+    description: description + (speakerName ? ("\nวิทยากร: " + speakerName) : ""),
     location: location,
     guests: guestEmail,
     sendInvites: true
@@ -56,17 +64,29 @@ function handleCalendarInvite(data) {
 
   // ส่งอีเมลยืนยันการลงทะเบียนเพิ่มเติม
   var subject = "ยืนยันการลงทะเบียน: " + title;
-  var body = "เรียน อาจารย์\n\n" +
+  var body = "เรียน " + recipientName + "\n\n" +
              "ท่านได้ลงทะเบียนเข้าร่วมการอบรมหลักสูตร \"" + title + "\" เรียบร้อยแล้ว\n" +
+             (speakerName ? ("วิทยากร: " + speakerName + "\n") : "") +
              "วันเวลา: " + dateStr + " (" + startTime + " - " + endTime + ")\n" +
              "สถานที่: " + location + "\n\n" +
              "ท่านสามารถตรวจสอบคำเชิญในปฏิทิน Google Calendar ของท่านเพื่อบันทึกวันเวลาดังกล่าว\n\n" +
              "สำนักพัฒนาการเรียนรู้ (Learning Development Office)\nมหาวิทยาลัยกรุงเทพ";
 
+  var htmlBody = "<div style='font-family: sans-serif; padding: 20px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;'>" +
+                 "<h3 style='color: #1e3a8a; margin-top: 0;'>เรียน " + recipientName + ",</h3>" +
+                 "<p>ท่านได้ลงทะเบียนเข้าร่วมการอบรมหลักสูตร <b>\"" + title + "\"</b> เรียบร้อยแล้ว</p>" +
+                 (speakerName ? ("<p><b>วิทยากร:</b> " + speakerName + "</p>") : "") +
+                 "<p><b>วันเวลา:</b> " + dateStr + " (" + startTime + " - " + endTime + ")</p>" +
+                 "<p><b>สถานที่:</b> " + location + "</p>" +
+                 "<p style='color: #475569; margin-top: 15px;'>ท่านสามารถตรวจสอบคำเชิญในปฏิทิน Google Calendar ของท่านเพื่อบันทึกวันเวลาดังกล่าว</p>" +
+                 "<p style='margin-top: 25px; font-weight: bold; color: #1e3a8a;'>สำนักพัฒนาการเรียนรู้ (Learning Development Office)<br>มหาวิทยาลัยกรุงเทพ</p>" +
+                 "</div>";
+
   MailApp.sendEmail({
     to: guestEmail,
     subject: subject,
     body: body,
+    htmlBody: htmlBody,
     name: "สำนักพัฒนาการเรียนรู้"
   });
 
@@ -97,13 +117,25 @@ function handleCertificates(data) {
     
     if (files.hasNext()) {
       var file = files.next();
-      var body = "เรียน " + recipient.name + "\n\n" + bodyTemplate + 
+      var greetingName = recipient.name || "ผู้เข้าร่วมอบรม";
+      if (greetingName.indexOf("เรียน ") === 0) {
+        greetingName = greetingName.substring(5).trim();
+      }
+
+      var body = "เรียน " + greetingName + "\n\n" + bodyTemplate + 
                  "\n\nสำนักพัฒนาการเรียนรู้ (Learning Development Office)\nมหาวิทยาลัยกรุงเทพ";
+
+      var htmlBody = "<div style='font-family: sans-serif; padding: 20px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;'>" +
+                     "<h3 style='color: #1e3a8a; margin-top: 0;'>เรียน " + greetingName + ",</h3>" +
+                     "<div style='white-space: pre-line; color: #334155; margin: 15px 0;'>" + bodyTemplate + "</div>" +
+                     "<p style='margin-top: 25px; font-weight: bold; color: #1e3a8a;'>สำนักพัฒนาการเรียนรู้ (Learning Development Office)<br>มหาวิทยาลัยกรุงเทพ</p>" +
+                     "</div>";
                  
       MailApp.sendEmail({
         to: recipient.email,
         subject: subject,
         body: body,
+        htmlBody: htmlBody,
         attachments: [file.getBlob()],
         name: "สำนักพัฒนาการเรียนรู้"
       });
@@ -121,13 +153,25 @@ function handleReminders(data) {
   var recipients = data.recipients;
 
   recipients.forEach(function(recipient) {
-    var body = "เรียน " + recipient.name + "\n\n" + bodyTemplate + 
+    var greetingName = recipient.name || "ผู้เข้าร่วมอบรม";
+    if (greetingName.indexOf("เรียน ") === 0) {
+      greetingName = greetingName.substring(5).trim();
+    }
+
+    var body = "เรียน " + greetingName + "\n\n" + bodyTemplate + 
                "\n\nสำนักพัฒนาการเรียนรู้ (Learning Development Office)\nมหาวิทยาลัยกรุงเทพ";
+
+    var htmlBody = "<div style='font-family: sans-serif; padding: 20px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;'>" +
+                   "<h3 style='color: #1e3a8a; margin-top: 0;'>เรียน " + greetingName + ",</h3>" +
+                   "<div style='white-space: pre-line; color: #334155; margin: 15px 0;'>" + bodyTemplate + "</div>" +
+                   "<p style='margin-top: 25px; font-weight: bold; color: #1e3a8a;'>สำนักพัฒนาการเรียนรู้ (Learning Development Office)<br>มหาวิทยาลัยกรุงเทพ</p>" +
+                   "</div>";
                
     MailApp.sendEmail({
       to: recipient.email,
       subject: subject,
       body: body,
+      htmlBody: htmlBody,
       name: "สำนักพัฒนาการเรียนรู้"
     });
   });
@@ -148,9 +192,19 @@ function handleEvaluations(data) {
       if (!recipient.email) return;
 
       var subject = "[BU Training] ขอความอนุเคราะห์ทำแบบประเมิน: " + courseTitle;
+      var greetingName = recipient.name || "ผู้เข้าร่วมอบรม";
+      if (greetingName.indexOf("เรียน ") === 0) {
+        greetingName = greetingName.substring(5).trim();
+      }
       
+      var body = "เรียน " + greetingName + ",\n\n" +
+                 "ขอขอบคุณที่ท่านสละเวลาเข้าร่วมการอบรมหลักสูตร \"" + courseTitle + "\"\n" +
+                 "เพื่อให้การจัดการอบรมในครั้งต่อไปดียิ่งขึ้น ทางสำนักพัฒนาการเรียนรู้ (LDO) ใคร่ขอความอนุเคราะห์ท่านสละเวลาทำแบบประเมินผลการอบรมตามลิงก์ด้านล่างนี้ครับ/ค่ะ\n\n" +
+                 evalLink + "\n\n" +
+                 "สำนักพัฒนาการเรียนรู้ (Learning Development Office)\nมหาวิทยาลัยกรุงเทพ";
+
       var htmlBody = "<div style='font-family: sans-serif; padding: 20px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;'>" +
-                     "<h3 style='color: #1e3a8a; margin-top: 0;'>เรียน " + (recipient.name || "ผู้เข้าร่วมอบรม") + ",</h3>" +
+                     "<h3 style='color: #1e3a8a; margin-top: 0;'>เรียน " + greetingName + ",</h3>" +
                      "<p>ขอขอบคุณที่ท่านสละเวลาเข้าร่วมการอบรมหลักสูตร <b>\"" + courseTitle + "\"</b></p>" +
                      "<p>เพื่อให้การจัดการอบรมในครั้งต่อไปดียิ่งขึ้น ทางสำนักพัฒนาการเรียนรู้ (LDO) ใคร่ขอความอนุเคราะห์ท่านสละเวลาทำแบบประเมินผลการอบรมตามลิงก์ด้านล่างนี้ครับ/ค่ะ</p>" +
                      "<div style='margin: 35px 0; text-align: center;'>" +
@@ -166,6 +220,7 @@ function handleEvaluations(data) {
       MailApp.sendEmail({
         to: recipient.email,
         subject: subject,
+        body: body,
         htmlBody: htmlBody,
         name: "สำนักพัฒนาการเรียนรู้"
       });
@@ -203,24 +258,13 @@ function validateFolder(folderId) {
 }
 ```
 
-## ขั้นตอนการติดตั้ง (สำคัญมาก):
+## ขั้นตอนการอัปเดตและ Redeploy Google Apps Script (ทำเพียงครั้งเดียว):
 
-1. ไปที่ [script.google.com](https://script.google.com)
-2. สร้างโปรเจกต์ใหม่
-3. ลบโค้ดเดิมออกและวางโค้ดด้านบนลงไปทั้งหมด
-4. **การให้สิทธิ์ (Authorization):** 
-   - ในแถบเครื่องมือด้านบน กดเลือกฟังก์ชัน **`authorizeScript`**
-   - กดปุ่ม **Run**
-   - จะมีหน้าต่างป๊อปอัปขึ้นมาให้เลือกบัญชี Google ของคุณ
-   - กดกดยอมรับ (หากขึ้นหน้าจอ 'Google has not verified this app' ให้กด **Advanced** > **Go to ... (unsafe)** เพื่อยืนยัน)
-   - **ถ้าไม่ทำขั้นตอนนี้ ระบบจะส่งอีเมลหรือใช้งานไดรฟ์ไม่ได้**
-5. **การ Deploy เพื่อรับ URL:**
-   - กดปุ่ม **Deploy** (สีน้ำเงิน) > **New Deployment**
-   - เลือกประเภท (**Select type**) เป็น **Web App**
-   - ตั้งค่าช่อง **Execute as:** เป็น **Me** (ตัวคุณเอง)
-   - ตั้งค่าช่อง **Who has access:** เป็น **Anyone** (ทุกคน - สำคัญที่สุด)
-   - กด **Deploy**
-   - คัดลอก **Web App URL** ที่ได้ (ลงท้ายด้วย `/exec`) แล้วนำไปวางในระบบหลังบ้าน (Admin Portal)
-6. **การตรวจสอบปัญหาการทำงาน:**
-   - หากส่งอีเมลไม่ออก ให้ไปที่แถบ **Executions** (รูปนาฬิกาด้านซ้าย) ในหน้า GAS Editor
-   - คุณจะเห็นสถานะการทำงานแต่ละครั้ง หากมีข้อผิดพลาดจะขึ้นเป็นสีแดง
+1. ไปที่โปรเจกต์เดิมของคุณที่ [script.google.com](https://script.google.com)
+2. วางโค้ดอัปเดตด้านบนทับโค้ดเดิมใน `Code.gs`
+3. กดบันทึก (ไอคอนแผ่นดิสก์ หรือ Ctrl+S / Cmd+S)
+4. กดปุ่ม **Deploy** (สีน้ำเงินมุมขวาบน) > **Manage deployments** (จัดการการทำให้ใช้งานได้)
+5. กดไอคอนรูปดินสอ (**Edit**) ที่ Version ล่าสุด
+6. ในช่อง **Version** เลือก **New version** (เวอร์ชันใหม่)
+7. กด **Deploy**
+8. การอัปเดตเสร็จสมบูรณ์ Web App URL เดิมจะใช้งานโค้ดเวอร์ชันใหม่ทันทีโดยไม่ต้องเปลี่ยน URL ในระบบ

@@ -2,7 +2,8 @@ import React, { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Calendar, User, ArrowRight, Clock, Layers, Users, X, MapPin } from "lucide-react";
 import { Course } from "../types";
-import { cn, formatInstructorName, formatDateThai } from "../lib/utils";
+import { cn, formatInstructorName, formatDateThai, formatDateLocalized, formatSessionTime, getCourseSessions, parseDateParts } from "../lib/utils";
+import { useLanguage } from "../contexts/LanguageContext";
 
 interface Props {
   course: Course;
@@ -14,33 +15,33 @@ interface Props {
 }
 
 export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEvaluate, isLoading, isRegistered }) => {
+  const { lang, t } = useLanguage();
   const [showImageModal, setShowImageModal] = useState(false);
 
-  const isCompleted = course.sessions?.every(session => {
-    const sessionDate = new Date(session.date);
+  const sessions = getCourseSessions(course);
+  const isMulti = sessions.length > 1;
+  const sessionCount = sessions.length;
+
+  const isCompleted = sessions.every(session => {
+    if (!session.date) return false;
+    const parts = parseDateParts(session.date);
+    if (!parts) return false;
+    const sessionDate = new Date(parts.year, parts.month - 1, parts.day, 23, 59, 59);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     return sessionDate < today;
   }) || false;
-
-  const sessionCount = course.sessions?.length || 0;
   
-  const hasSessions = course.sessions && course.sessions.length > 0;
-  const maxSeats = hasSessions 
-    ? course.sessions!.reduce((sum, s) => sum + (s.maxSeats || 0), 0) 
-    : (course.maxSeats || 0);
-    
-  const enrolledSeats = hasSessions 
-    ? course.sessions!.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0) 
-    : (course.enrolledSeats || 0);
+  const maxSeats = course.maxSeats || (sessions.length > 0 ? (sessions[0].maxSeats || 40) : 40);
+  const enrolledSeats = course.enrolledSeats || course.totalRegistrations || 0;
   
   const availableSeats = Math.max(0, maxSeats - enrolledSeats);
   const isFull = maxSeats > 0 && availableSeats === 0;
 
-  const startTime = course.sessions?.[0]?.startTime || (course as any).startTime || "";
-  const endTime = course.sessions?.[0]?.endTime || (course as any).endTime || "";
-  const locationDetail = course.sessions?.[0]?.locationDetail || (course as any).locationDetail || "ไม่ระบุ";
-  const timeString = startTime && endTime ? `${startTime} - ${endTime} น.` : startTime ? `${startTime} น.` : "";
+  const startTime = sessions[0]?.startTime || course.startTime || "";
+  const endTime = sessions[0]?.endTime || course.endTime || "";
+  const locationDetail = sessions[0]?.locationDetail || course.locationDetail || "ไม่ระบุ";
+  const timeString = formatSessionTime(startTime, endTime, lang);
 
   return (
     <>
@@ -66,6 +67,10 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
               <span className="bg-slate-800 text-white text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-lg flex items-center gap-1.5">
                 <Clock className="w-3 h-3" strokeWidth={1.5} /> Completed
               </span>
+            ) : isMulti ? (
+              <span className="bg-amber-600 text-white text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-lg flex items-center gap-1.5">
+                <Calendar className="w-3 h-3" /> {lang === 'en' ? `${sessionCount} Days` : `อบรม ${sessionCount} วัน`}
+              </span>
             ) : isFull ? (
               <span className="bg-orange-500 text-white text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-lg">
                 ที่นั่งเต็มแล้ว
@@ -73,11 +78,6 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
             ) : (
               <span className="bg-crimson text-white text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-lg">
                 Open for Registration
-              </span>
-            )}
-            {sessionCount > 1 && (
-              <span className="bg-white/90 backdrop-blur-md text-slate-800 text-[10px] font-medium uppercase tracking-widest px-3 py-1.5 rounded-full shadow-sm flex items-center gap-1.5">
-                <Layers className="w-3 h-3 text-crimson" strokeWidth={1.5} /> {sessionCount} Sessions
               </span>
             )}
           </div>
@@ -98,25 +98,71 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
               <div className="w-8 h-8 rounded-lg bg-slate-50 flex items-center justify-center">
                 <User className="w-4 h-4 text-crimson" strokeWidth={1.5} />
               </div>
-              <span className="font-light tracking-wide">{formatInstructorName(course.instructorName)}</span>
+              <span className="font-light tracking-wide">{formatInstructorName(course.instructorName, course.instructorId)}</span>
             </div>
-            <div className="flex flex-col gap-2 bg-crimson/5 p-3 rounded-xl">
-              <div className="flex items-center gap-3 text-crimson text-sm">
-                <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm shrink-0">
-                  <Calendar className="w-4 h-4 text-crimson" strokeWidth={1.5} />
+
+            {/* Schedule Display: Single-Day vs Multi-Day */}
+            {!isMulti ? (
+              <div className="flex flex-col gap-2 bg-crimson/5 p-3 rounded-xl">
+                <div className="flex items-center gap-3 text-crimson text-sm">
+                  <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm shrink-0">
+                    <Calendar className="w-4 h-4 text-crimson" strokeWidth={1.5} />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="font-medium tracking-wide">
+                      {t("trainingDate")} {formatDateLocalized(sessions[0]?.date || course.date, lang)}
+                    </span>
+                    {timeString && <span className="text-xs font-medium opacity-80">{t("trainingTime")} {timeString}</span>}
+                  </div>
                 </div>
-                <div className="flex flex-col">
-                  <span className="font-medium tracking-wide">วันที่อบรม: {formatDateThai(course.date)}</span>
-                  {timeString && <span className="text-xs font-medium opacity-80">เวลา: {timeString}</span>}
+                <div className="flex items-center gap-3 text-crimson text-sm">
+                  <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm shrink-0">
+                    <MapPin className="w-4 h-4 text-crimson" strokeWidth={1.5} />
+                  </div>
+                  <span className="font-medium tracking-wide text-xs">{t("room")} {locationDetail}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-3 text-crimson text-sm">
-                <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm shrink-0">
-                  <MapPin className="w-4 h-4 text-crimson" strokeWidth={1.5} />
+            ) : (
+              <div className="flex flex-col gap-2.5 bg-crimson/5 p-4 rounded-2xl border border-crimson/10">
+                <div className="flex items-center justify-between text-crimson text-xs font-bold border-b border-crimson/10 pb-2">
+                  <span className="flex items-center gap-1.5">
+                    <Calendar className="w-4 h-4 text-crimson" />
+                    {t("scheduleTitle")} ({sessionCount} {lang === 'en' ? "Days" : "วัน"})
+                  </span>
+                  <span className="text-[10px] font-normal text-slate-500">
+                    {lang === 'en' ? "Specific Dates" : "กำหนดการแต่ละวัน"}
+                  </span>
                 </div>
-                <span className="font-medium tracking-wide text-xs">ห้อง: {locationDetail}</span>
+
+                <div className="space-y-1.5">
+                  {sessions.map((session, idx) => (
+                    <div 
+                      key={session.id} 
+                      className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-xs text-slate-700 bg-white/90 px-3 py-2 rounded-xl border border-slate-100 shadow-sm"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-crimson text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                          {idx + 1}
+                        </span>
+                        <span className="font-medium text-slate-800">
+                          {lang === 'en' ? `Day ${idx + 1}:` : `วันที่ ${idx + 1}:`} {formatDateLocalized(session.date, lang)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-slate-500 font-light text-[11px] pl-7 sm:pl-0">
+                        <Clock className="w-3 h-3 text-crimson" />
+                        <span>{formatSessionTime(session.startTime, session.endTime, lang)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-2 text-crimson text-xs pt-1.5 border-t border-crimson/10">
+                  <MapPin className="w-3.5 h-3.5 shrink-0" />
+                  <span className="font-medium text-xs">{t("room")} {locationDetail}</span>
+                </div>
               </div>
-            </div>
+            )}
+
             {maxSeats > 0 && (
               <div className="flex items-center gap-3 text-slate-500 text-sm">
                 <div className="w-8 h-8 rounded-lg bg-slate-50 flex items-center justify-center">
@@ -138,27 +184,50 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                 ทำแบบประเมินผล
                 <ArrowRight className="w-4 h-4" strokeWidth={1.5} />
               </button>
+            ) : isRegistered ? (
+              <button
+                onClick={() => onCancel?.(course.id)}
+                disabled={isLoading || isCompleted}
+                className="w-full md:w-auto px-8 font-medium py-2.5 text-sm rounded-lg transition-all flex items-center justify-center gap-2 bg-white text-red-500 border border-red-200 hover:bg-red-50 shadow-sm"
+              >
+                {isLoading ? (
+                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <>
+                    <span>{t("cancelRegistration") || "ยกเลิกการลงทะเบียน"}</span>
+                    <X className="w-4 h-4" strokeWidth={1.5} />
+                  </>
+                )}
+              </button>
+            ) : isMulti ? (
+              // Multi-day workshop new registration guarded until downstream workflow is verified
+              <div className="flex flex-col items-end gap-1 w-full md:w-auto">
+                <button
+                  disabled
+                  className="w-full md:w-auto px-6 py-2.5 text-xs rounded-lg flex items-center justify-center gap-2 bg-slate-100 text-slate-500 border border-slate-200 cursor-not-allowed font-medium"
+                >
+                  <Clock className="w-3.5 h-3.5 text-amber-600" />
+                  {t("multiDayRegistrationPending")}
+                </button>
+                <span className="text-[10px] text-slate-400">
+                  {lang === 'en' ? "Multi-day registration is coming soon" : "รอเปิดระบบรับสมัครรอบใหม่"}
+                </span>
+              </div>
             ) : (
               <button
                 onClick={() => {
-                  if (course.sessions && course.sessions.length > 1) {
-                    onRegister(course.id);
-                  } else {
-                    isRegistered ? onCancel?.(course.id) : onRegister(course.id);
-                  }
+                  isRegistered ? onCancel?.(course.id) : onRegister(course.id);
                 }}
-                disabled={isLoading || isCompleted || (!isRegistered && isFull && !(course.sessions && course.sessions.length > 1))}
+                disabled={isLoading || isCompleted || (!isRegistered && isFull)}
                 className={cn(
                   "w-full md:w-auto px-8 font-medium py-2.5 text-sm rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 tracking-wide",
                   isCompleted 
                     ? "bg-slate-100 text-slate-400 cursor-not-allowed" 
-                    : (course.sessions && course.sessions.length > 1 && isRegistered)
-                      ? "bg-crimson/5 text-crimson border-2 border-crimson/20 hover:bg-crimson/10 font-bold"
-                      : isRegistered
-                        ? "bg-white text-red-500 border border-red-200 hover:bg-red-50 shadow-sm"
-                        : isFull
-                          ? "bg-orange-100 text-orange-600 border border-orange-200 cursor-not-allowed"
-                          : "bg-crimson hover:bg-crimson-dark text-white shadow-md shadow-crimson/10"
+                    : isRegistered
+                      ? "bg-white text-red-500 border border-red-200 hover:bg-red-50 shadow-sm"
+                      : isFull
+                        ? "bg-orange-100 text-orange-600 border border-orange-200 cursor-not-allowed"
+                        : "bg-crimson hover:bg-crimson-dark text-white shadow-md shadow-crimson/10"
                 )}
               >
                 {isLoading ? (
@@ -167,16 +236,14 @@ export const CourseCard: React.FC<Props> = ({ course, onRegister, onCancel, onEv
                   <>
                     {isCompleted 
                       ? "ปิดรับสมัครแล้ว" 
-                      : (course.sessions && course.sessions.length > 1 && isRegistered)
-                        ? "จัดการการลงทะเบียน / ลงทะเบียนเพิ่ม"
-                        : isRegistered 
-                          ? "ยกเลิกการลงทะเบียน" 
-                          : isFull 
-                            ? "ที่นั่งเต็ม" 
-                            : "ลงทะเบียนเข้าร่วม"
+                      : isRegistered 
+                        ? "ยกเลิกการลงทะเบียน" 
+                        : isFull 
+                          ? "ที่นั่งเต็ม" 
+                          : "ลงทะเบียนเข้าร่วม"
                     }
                     {!isCompleted && !isRegistered && !isFull && <ArrowRight className="w-4 h-4" strokeWidth={1.5} />}
-                    {((isRegistered && !isCompleted && !(course.sessions && course.sessions.length > 1)) || (course.sessions && course.sessions.length > 1 && isRegistered)) && (
+                    {isRegistered && !isCompleted && (
                       <X className="w-4 h-4" strokeWidth={1.5} />
                     )}
                   </>

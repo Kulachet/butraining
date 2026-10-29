@@ -11,7 +11,9 @@ import { motion, AnimatePresence } from "motion/react";
 import { Search, Filter, Sparkles, Loader2, X, Clock, MapPin, CheckCircle2, AlertCircle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
-import { cn, generateGoogleCalendarUrl } from "../lib/utils";
+import { cn, generateGoogleCalendarUrl, formatInstructorName, isMultiDayCourse } from "../lib/utils";
+import { useLanguage } from "../contexts/LanguageContext";
+import { LanguageSwitcher } from "../components/LanguageSwitcher";
 
 interface CancelTarget {
   courseId: string;
@@ -23,6 +25,7 @@ interface CancelTarget {
 
 export const LandingPage: React.FC = () => {
   const navigate = useNavigate();
+  const { lang, t } = useLanguage();
   const [courses, setCourses] = useState<Course[]>([]);
   const [userRegistrations, setUserRegistrations] = useState<Registration[]>([]);
   const [loading, setLoading] = useState(true);
@@ -120,12 +123,18 @@ export const LandingPage: React.FC = () => {
     const course = courses.find(c => c.id === courseId);
     if (!course) return;
 
+    // Phase 1 Guard: Multi-day workshop registration is restricted
+    if (isMultiDayCourse(course)) {
+      toast.error("หลักสูตรแบบหลายวันยังไม่เปิดให้ลงทะเบียนใน Phase 1 (ระบบกำลังเตรียมความพร้อม)");
+      return;
+    }
+
     if (course.sessions && course.sessions.length > 1) {
       setSelectedCourseForSession(course);
-      setSelectedSessionId(course.sessions[0].sessionId);
+      setSelectedSessionId((course.sessions[0] as any).sessionId || course.sessions[0].id);
     } else {
       // Single session or legacy course
-      const session = course.sessions?.[0];
+      const session = course.sessions?.[0] as any;
       handleFinalRegister(course, session);
     }
   };
@@ -139,15 +148,27 @@ export const LandingPage: React.FC = () => {
       
       // Auto-send Calendar Invite via GAS
       const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
+      const formattedGuestName = formatInstructorName(instructor!.name, instructor!.id, instructor!.position);
+      const formattedSpeakerName = formatInstructorName(course.instructorName, course.instructorId);
+
+      const locationText = session?.locationDetail || course.locationDetail || "ไม่ระบุ";
+      const dateText = session?.date || course.date;
+      const startText = session?.startTime || course.startTime || "09:00";
+      const endText = session?.endTime || course.endTime || "16:00";
+
       const payload = {
         courseTitle: course.title,
         description: course.description || "",
-        instructorName: course.instructorName || "",
-        location: session?.locationDetail || course.locationDetail || "ไม่ระบุ",
+        instructorName: formattedSpeakerName || course.instructorName || "",
+        location: locationText,
         guestEmail: instructor!.email,
-        date: session?.date || course.date,
-        startTime: session?.startTime || course.startTime || "09:00",
-        endTime: session?.endTime || course.endTime || "16:00"
+        guestName: formattedGuestName,
+        recipientName: formattedGuestName,
+        guestId: instructor!.id,
+        guestPosition: instructor!.position || "",
+        date: dateText,
+        startTime: startText,
+        endTime: endText
       };
 
       fetch(gasUrl, {
@@ -259,21 +280,23 @@ export const LandingPage: React.FC = () => {
     }
   };
 
+  const isAllCategory = selectedCategory === "ทั้งหมด" || selectedCategory === "All";
   const filteredCourses = courses.filter(course => {
     const matchesSearch = course.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
                           (course.description && course.description.toLowerCase().includes(searchQuery.toLowerCase())) ||
                           (course.instructorName && course.instructorName.toLowerCase().includes(searchQuery.toLowerCase()));
-    const matchesCategory = selectedCategory === "ทั้งหมด" || course.category === selectedCategory;
+    const matchesCategory = isAllCategory || course.category === selectedCategory;
     return matchesSearch && matchesCategory;
   });
 
   // Extract unique categories from courses
-  const categories = ["ทั้งหมด", ...Array.from(new Set(courses.map(c => c.category).filter(Boolean)))];
+  const allCategoryLabel = lang === "en" ? "All" : "ทั้งหมด";
+  const categories = [allCategoryLabel, ...Array.from(new Set(courses.map(c => c.category).filter(Boolean)))];
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {!user ? (
-        <div className="flex-1 relative flex flex-col items-center justify-center overflow-hidden px-4">
+        <div className="flex-1 relative flex flex-col items-center justify-center overflow-hidden px-4 py-16">
           {/* Background Image */}
           <div 
             className="absolute inset-0 z-0 bg-cover bg-center bg-no-repeat"
@@ -284,38 +307,58 @@ export const LandingPage: React.FC = () => {
           {/* White Overlay to lighten the background */}
           <div className="absolute inset-0 z-0 bg-white/70" />
 
+          {/* Prominent Language Switcher */}
+          <div className="relative z-20 mb-8">
+            <LanguageSwitcher size="md" className="shadow-lg bg-white/95 border-slate-300" />
+          </div>
+
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             className="relative z-10 text-center max-w-4xl mx-auto"
           >
-            <h1 className="text-3xl md:text-5xl font-medium text-slate-800 mb-2 tracking-wide leading-tight">
-              ยินดีต้อนรับสู่ระบบลงทะเบียน
-            </h1>
-            <h1 className="text-3xl md:text-5xl font-medium text-slate-800 mb-2 tracking-wide leading-tight">
-              การอบรมเชิงปฏิบัติการ
-            </h1>
-            <h1 className="text-3xl md:text-5xl font-medium text-crimson mb-10 tracking-wide leading-tight">
-              สำนักพัฒนาการเรียนรู้
-            </h1>
-            
-            <p className="text-lg md:text-xl text-slate-600 font-light tracking-wide leading-relaxed mb-1">
-              กรุณาเข้าสู่ระบบด้วยบัญชี Google ของมหาวิทยาลัย
-            </p>
-            <p className="text-lg md:text-xl text-slate-600 font-light tracking-wide leading-relaxed mb-16">
-              เพื่อดำเนินการลงทะเบียนอบรม
-            </p>
+            {lang === "en" ? (
+              <>
+                <h1 className="text-3xl md:text-5xl font-medium text-slate-800 mb-3 tracking-wide leading-tight">
+                  Welcome to the Academic Training Portal
+                </h1>
+                <h1 className="text-3xl md:text-5xl font-medium text-crimson mb-8 tracking-wide leading-tight">
+                  Learning Development Office
+                </h1>
+                <p className="text-lg md:text-xl text-slate-600 font-light tracking-wide leading-relaxed mb-12 max-w-2xl mx-auto">
+                  Sign in with your Bangkok University Google account to explore and register for professional development workshops.
+                </p>
+              </>
+            ) : (
+              <>
+                <h1 className="text-3xl md:text-5xl font-medium text-slate-800 mb-2 tracking-wide leading-tight">
+                  ยินดีต้อนรับสู่ระบบลงทะเบียน
+                </h1>
+                <h1 className="text-3xl md:text-5xl font-medium text-slate-800 mb-2 tracking-wide leading-tight">
+                  การอบรมเชิงปฏิบัติการ
+                </h1>
+                <h1 className="text-3xl md:text-5xl font-medium text-crimson mb-10 tracking-wide leading-tight">
+                  สำนักพัฒนาการเรียนรู้
+                </h1>
+                <p className="text-lg md:text-xl text-slate-600 font-light tracking-wide leading-relaxed mb-1">
+                  กรุณาเข้าสู่ระบบด้วยบัญชี Google ของมหาวิทยาลัย
+                </p>
+                <p className="text-lg md:text-xl text-slate-600 font-light tracking-wide leading-relaxed mb-16">
+                  เพื่อดำเนินการลงทะเบียนอบรม
+                </p>
+              </>
+            )}
             
             <button 
               onClick={login}
-              className="bg-crimson hover:bg-crimson-dark text-white font-medium px-10 py-4 rounded-2xl shadow-2xl shadow-crimson/10 transition-all flex items-center justify-center gap-4 mx-auto text-xl group"
+              className="bg-crimson hover:bg-crimson-dark text-white font-medium px-10 py-4 rounded-2xl shadow-2xl shadow-crimson/10 transition-all flex items-center justify-center gap-4 mx-auto text-xl group cursor-pointer"
             >
               <div className="w-7 h-7 bg-white/20 rounded-lg flex items-center justify-center group-hover:scale-105 transition-transform">
                 <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
                 </svg>
               </div>
-              เข้าสู่ระบบด้วย Google
+              {t("welcomeSignInButton")}
             </button>
           </motion.div>
         </div>
@@ -336,14 +379,14 @@ export const LandingPage: React.FC = () => {
                 >
                   <div className="inline-flex items-center gap-2 bg-crimson-light px-4 py-2 rounded-full text-crimson font-medium text-sm mb-8 tracking-wide">
                     <Sparkles className="w-4 h-4" />
-                    <span>Bangkok University Training Portal</span>
+                    <span>{t("heroBadge")}</span>
                   </div>
                   <h1 className="text-4xl md:text-5xl font-medium text-slate-800 mb-6 tracking-wide leading-tight">
-                    พัฒนาศักยภาพอาจารย์<br />
-                    <span className="text-crimson">สู่ความเป็นเลิศทางวิชาการ</span>
+                    {t("heroTitle1")}<br />
+                    <span className="text-crimson">{t("heroTitle2")}</span>
                   </h1>
                   <p className="text-xl text-slate-500 font-light leading-relaxed mb-10 tracking-wide">
-                    ยกระดับทักษะการสอนและการวิจัยด้วยหลักสูตรที่ทันสมัย ออกแบบมาเพื่ออาจารย์มหาวิทยาลัยกรุงเทพโดยเฉพาะ
+                    {t("heroSubtitle")}
                   </p>
                 </motion.div>
 
@@ -364,7 +407,7 @@ export const LandingPage: React.FC = () => {
             <div className="w-full flex flex-col gap-6">
               {filteredCourses.length === 0 ? (
                 <div className="bg-white p-12 rounded-3xl border border-slate-200 shadow-sm text-center">
-                  <p className="text-slate-500 font-light">ไม่พบหลักสูตรที่ค้นหา</p>
+                  <p className="text-slate-500 font-light">{t("noCoursesFound")}</p>
                 </div>
               ) : (
                 filteredCourses.map((course, index) => (
@@ -408,7 +451,7 @@ export const LandingPage: React.FC = () => {
               <div className="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mx-auto mb-6">
                 <AlertCircle className="w-8 h-8" />
               </div>
-              <h3 className="text-2xl font-bold text-center text-slate-800 mb-2">ยืนยันการยกเลิก</h3>
+              <h3 className="text-2xl font-bold text-center text-slate-800 mb-2">{t("cancelConfirmTitle")}</h3>
               {courseToCancel.courseTitle && (
                 <p className="text-center font-medium text-slate-700 mb-1 px-4 truncate">
                   {courseToCancel.courseTitle}
@@ -416,11 +459,11 @@ export const LandingPage: React.FC = () => {
               )}
               {courseToCancel.sessionName && (
                 <p className="text-center text-xs text-crimson font-medium mb-3">
-                  เซสชัน: {courseToCancel.sessionName}
+                  {t("cancelSessionLabel")} {courseToCancel.sessionName}
                 </p>
               )}
               <p className="text-center text-slate-500 mb-8 text-sm">
-                คุณต้องการยกเลิกการลงทะเบียนหลักสูตรนี้ใช่หรือไม่? ที่นั่งของคุณจะถูกคืนเข้าสู่ระบบ
+                {t("cancelConfirmDesc")}
               </p>
               <div className="flex gap-3">
                 <button
@@ -429,7 +472,7 @@ export const LandingPage: React.FC = () => {
                   className="flex-1 py-3 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition-colors disabled:opacity-50"
                   disabled={registering === courseToCancel.courseId}
                 >
-                  ย้อนกลับ
+                  {t("cancelBack")}
                 </button>
                 <button
                   type="button"
@@ -440,7 +483,7 @@ export const LandingPage: React.FC = () => {
                   {registering === courseToCancel.courseId ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    "ยืนยันการยกเลิก"
+                    t("cancelConfirmAction")
                   )}
                 </button>
               </div>

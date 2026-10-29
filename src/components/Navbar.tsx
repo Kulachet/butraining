@@ -3,9 +3,12 @@ import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthProvider";
 import { LogOut, User, Settings, ShieldCheck } from "lucide-react";
 import { cn, formatInstructorName } from "../lib/utils";
+import { LanguageSwitcher } from "./LanguageSwitcher";
+import { useLanguage } from "../contexts/LanguageContext";
 
 export const Navbar: React.FC = () => {
   const { user, instructor, login, logout, isAdmin } = useAuth();
+  const { t } = useLanguage();
   const navigate = useNavigate();
 
   return (
@@ -33,17 +36,19 @@ export const Navbar: React.FC = () => {
             )}
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 sm:gap-4">
+            <LanguageSwitcher size="sm" />
+
             {!user && (
               <div className="hidden sm:flex items-center justify-center w-10 h-10 rounded-full border border-slate-100 text-slate-300">
                 <ShieldCheck className="w-5 h-5" />
               </div>
             )}
             {user ? (
-              <div className="flex items-center gap-6">
+              <div className="flex items-center gap-4 sm:gap-6">
                 <div className="flex items-center gap-3">
                   <div className="flex flex-col items-end hidden sm:flex">
-                    <span className="text-sm font-medium text-slate-800 tracking-wide">{instructor ? formatInstructorName(instructor.name) : user.displayName}</span>
+                    <span className="text-sm font-medium text-slate-800 tracking-wide">{instructor ? formatInstructorName(instructor.name, instructor.id, instructor.position) : user.displayName}</span>
                     <span className="text-[10px] font-light text-slate-500 tracking-widest">{instructor?.position || "Instructor"}</span>
                   </div>
                   <Link to="/profile" className="w-10 h-10 rounded-full border border-slate-100 p-0.5 overflow-hidden hover:border-crimson transition-all">
@@ -53,10 +58,10 @@ export const Navbar: React.FC = () => {
                 
                 <button 
                   onClick={logout}
-                  className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 rounded-xl transition-all border border-transparent hover:border-red-100"
+                  className="flex items-center gap-2 px-3 sm:px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 rounded-xl transition-all border border-transparent hover:border-red-100"
                 >
                   <LogOut className="w-4 h-4" />
-                  <span className="hidden sm:inline">ออกจากระบบ</span>
+                  <span className="hidden sm:inline">{t("navSignOut")}</span>
                 </button>
               </div>
             ) : (
@@ -64,12 +69,12 @@ export const Navbar: React.FC = () => {
                 onClick={async () => {
                   await login();
                 }}
-                className="bg-crimson hover:bg-crimson-dark text-white text-sm font-medium px-6 py-2.5 rounded-xl shadow-lg shadow-crimson/10 transition-all flex items-center gap-2 tracking-wide"
+                className="bg-crimson hover:bg-crimson-dark text-white text-sm font-medium px-5 sm:px-6 py-2.5 rounded-xl shadow-lg shadow-crimson/10 transition-all flex items-center gap-2 tracking-wide"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
                 </svg>
-                เข้าสู่ระบบ
+                {t("navSignIn")}
               </button>
             )}
           </div>

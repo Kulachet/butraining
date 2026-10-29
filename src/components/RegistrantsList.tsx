@@ -40,8 +40,9 @@ import {
   getDoc
 } from "firebase/firestore";
 import { db, auth } from "../lib/firebase";
-import { Course, Registration } from "../types";
-import { cn, formatInstructorName } from "../lib/utils";
+import { Course, Registration, SessionAttendance } from "../types";
+import { cn, formatInstructorName, getCourseSessions, isMultiDayCourse, formatDateThai } from "../lib/utils";
+import { RegistrationService } from "../lib/registrationService";
 import toast from "react-hot-toast";
 import { QRCodeSVG } from "qrcode.react";
 import Papa from "papaparse";
@@ -54,6 +55,7 @@ export const RegistrantsList: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterTab, setFilterTab] = useState<"all" | "attended">("all");
   const [showQrModal, setShowQrModal] = useState(false);
+  const [selectedQrSessionId, setSelectedQrSessionId] = useState<string>("");
   const [showCertModal, setShowCertModal] = useState(false);
   const [certFolderId, setCertFolderId] = useState("");
   const [certRecipients, setCertRecipients] = useState<Registration[]>([]);
@@ -95,25 +97,49 @@ export const RegistrantsList: React.FC = () => {
   const [reminderBody, setReminderBody] = useState("");
   const [isSendingReminder, setIsSendingReminder] = useState(false);
 
-  // Fetch instructors for mapping ID
+  // Fetch instructors for mapping ID and resolving latest master instructor data
+  const [instructorRecords, setInstructorRecords] = useState<Record<string, { id: string; name: string; position?: string }>>({});
+
   useEffect(() => {
     const fetchInstructors = async () => {
       try {
         const snap = await getDocs(collection(db, "instructors"));
         const map: Record<string, string> = {};
+        const records: Record<string, { id: string; name: string; position?: string }> = {};
         snap.docs.forEach(doc => {
           const data = doc.data();
-          if (data.email && data.id) {
-            map[data.email] = data.id;
+          if (data.id) {
+            const instObj = { id: data.id, name: data.name, position: data.position };
+            records[data.id] = instObj;
+            records[data.id.toLowerCase().trim()] = instObj;
+            if (data.email) {
+              const emailKey = data.email.toLowerCase().trim();
+              map[data.email] = data.id;
+              map[emailKey] = data.id;
+              records[emailKey] = instObj;
+            }
           }
         });
         setInstructorMap(map);
+        setInstructorRecords(records);
       } catch (error) {
         console.error("Error fetching instructors:", error);
       }
     };
     fetchInstructors();
   }, []);
+
+  const formatRegName = (userName: string, userEmail?: string, instId?: string, userPos?: string) => {
+    const emailKey = userEmail ? userEmail.toLowerCase().trim() : "";
+    const idKey = instId ? instId.toLowerCase().trim() : "";
+    const matched = (emailKey && instructorRecords[emailKey]) || (idKey && instructorRecords[idKey]);
+
+    const resolvedId = matched?.id || instId || (userEmail ? (instructorMap[userEmail] || instructorMap[emailKey]) : undefined);
+    const resolvedName = matched?.name || userName;
+    const resolvedPos = matched?.position !== undefined ? matched.position : userPos;
+
+    return formatInstructorName(resolvedName, resolvedId, resolvedPos);
+  };
 
   // Fetch all courses for the dropdown
   useEffect(() => {
@@ -166,6 +192,35 @@ export const RegistrantsList: React.FC = () => {
     });
     return map;
   }, [registrations]);
+
+  const selectedCourse = useMemo(() => courses.find(c => c.id === selectedCourseId), [courses, selectedCourseId]);
+  const isMulti = useMemo(() => selectedCourse ? isMultiDayCourse(selectedCourse) : false, [selectedCourse]);
+
+  const displaySessions = useMemo(() => {
+    if (!selectedCourse) return [];
+    const activeSessions = getCourseSessions(selectedCourse);
+    const activeIds = new Set(activeSessions.map(s => s.id));
+    
+    // Collect any historical session IDs present in registrations' attendedSessions
+    const historicalSessions: Array<{ id: string; sessionName: string; date: string; isHistorical?: boolean }> = [];
+    registrations.forEach(r => {
+      if (r.attendedSessions) {
+        Object.entries(r.attendedSessions).forEach(([sId, rec]) => {
+          const record = rec as SessionAttendance;
+          if (!activeIds.has(sId) && !historicalSessions.some(h => h.id === sId)) {
+            historicalSessions.push({
+              id: sId,
+              sessionName: record?.sessionName ? `${record.sessionName} (เดิม)` : `วันที่เดิม (${sId})`,
+              date: record?.sessionDate || "",
+              isHistorical: true
+            });
+          }
+        });
+      }
+    });
+
+    return [...activeSessions, ...historicalSessions];
+  }, [selectedCourse, registrations]);
 
   const filteredRegistrations = registrations.filter(reg => {
     const matchesSearch = 
@@ -257,21 +312,55 @@ export const RegistrantsList: React.FC = () => {
     }
 
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
-    const data = filteredRegistrations.map((reg, index) => {
-      const displaySequenceNumber = registrationOrderMap.get(reg.id) ?? (index + 1);
-      return {
-        "ลำดับ": displaySequenceNumber,
-        "ลำดับการเช็คอิน": reg.checkInSequenceNumber || "-",
-        "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
-        "ชื่อ-นามสกุล": formatInstructorName(reg.userName),
-        "อีเมล": reg.userEmail,
-        "หน่วยงาน": reg.userDepartment,
-        "ตำแหน่ง": reg.userPosition,
-        "สถานะการเข้าอบรม": reg.attended ? "มาอบรมจริง" : "ยังไม่ได้เช็คอิน",
-        "เวลาเช็คอิน": reg.checkInAt ? new Date(reg.checkInAt).toLocaleString('th-TH') : "-",
-        "วันที่ลงทะเบียน": new Date(reg.registeredAt).toLocaleString('th-TH')
-      };
-    });
+    let data;
+
+    if (isMulti) {
+      data = filteredRegistrations.map((reg, index) => {
+        const displaySequenceNumber = registrationOrderMap.get(reg.id) ?? (index + 1);
+        const rowData: Record<string, any> = {
+          "ลำดับ": displaySequenceNumber,
+          "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
+          "ชื่อ-นามสกุล": formatRegName(reg.userName, reg.userEmail, reg.instructorId, reg.userPosition),
+          "อีเมล": reg.userEmail,
+          "หน่วยงาน": reg.userDepartment,
+          "ตำแหน่ง": reg.userPosition,
+        };
+
+        let attendedDaysCount = 0;
+        displaySessions.forEach((s, sIdx) => {
+          const att = reg.attendedSessions?.[s.id];
+          const colTitle = `${s.sessionName || `วันที่ ${sIdx + 1}`}${s.date ? ` (${s.date})` : ''}`;
+          if (att?.attended) {
+            attendedDaysCount += 1;
+            const timeStr = att.checkInAt ? new Date(att.checkInAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '';
+            rowData[colTitle] = `มาอบรม${timeStr ? ` (${timeStr})` : ''}${att.checkInSequenceNumber ? ` #${att.checkInSequenceNumber}` : ''}`;
+          } else {
+            rowData[colTitle] = "ยังไม่ได้เช็คอิน";
+          }
+        });
+
+        rowData["สรุปการเข้าอบรม"] = `${attendedDaysCount}/${displaySessions.length} วัน`;
+        rowData["สถานะภาพรวม"] = reg.attended ? "มาอบรมจริง" : "ยังไม่ได้เช็คอิน";
+        rowData["วันที่ลงทะเบียน"] = new Date(reg.registeredAt).toLocaleString('th-TH');
+        return rowData;
+      });
+    } else {
+      data = filteredRegistrations.map((reg, index) => {
+        const displaySequenceNumber = registrationOrderMap.get(reg.id) ?? (index + 1);
+        return {
+          "ลำดับ": displaySequenceNumber,
+          "ลำดับการเช็คอิน": reg.checkInSequenceNumber || "-",
+          "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
+          "ชื่อ-นามสกุล": formatRegName(reg.userName, reg.userEmail, reg.instructorId, reg.userPosition),
+          "อีเมล": reg.userEmail,
+          "หน่วยงาน": reg.userDepartment,
+          "ตำแหน่ง": reg.userPosition,
+          "สถานะการเข้าอบรม": reg.attended ? "มาอบรมจริง" : "ยังไม่ได้เช็คอิน",
+          "เวลาเช็คอิน": reg.checkInAt ? new Date(reg.checkInAt).toLocaleString('th-TH') : "-",
+          "วันที่ลงทะเบียน": new Date(reg.registeredAt).toLocaleString('th-TH')
+        };
+      });
+    }
 
     const csv = Papa.unparse(data);
     const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
@@ -367,7 +456,7 @@ export const RegistrantsList: React.FC = () => {
       
       rows.push([
         escapeCsvCell(index + 1),
-        escapeCsvCell(formatInstructorName(r.userName)),
+        escapeCsvCell(formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)),
         escapeCsvCell(r.userEmail),
         escapeCsvCell(isSelected ? "ใช่" : "ไม่ใช่"),
         escapeCsvCell(statusLabel)
@@ -379,7 +468,7 @@ export const RegistrantsList: React.FC = () => {
       const isSelected = certSelectedIds.includes(r.id);
       rows.push([
         escapeCsvCell(certRecipients.length + index + 1),
-        escapeCsvCell(formatInstructorName(r.name)),
+        escapeCsvCell(formatRegName(r.name, r.email)),
         escapeCsvCell(r.email),
         escapeCsvCell(isSelected ? "ใช่" : "ไม่ใช่"),
         escapeCsvCell("ยังไม่ส่ง")
@@ -492,7 +581,7 @@ export const RegistrantsList: React.FC = () => {
         const globalIndex = certRecipients.findIndex(cr => cr.id === r.id);
         return {
           email: r.userEmail,
-          name: formatInstructorName(r.userName),
+          name: formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition),
           sequence: globalIndex + 1
         };
       }),
@@ -500,7 +589,7 @@ export const RegistrantsList: React.FC = () => {
         const customIndex = customCertRecipients.findIndex(ccr => ccr.id === r.id);
         return {
           email: r.email,
-          name: formatInstructorName(r.name),
+          name: formatRegName(r.name, r.email),
           sequence: certRecipients.length + customIndex + 1
         };
       })
@@ -576,7 +665,7 @@ export const RegistrantsList: React.FC = () => {
         const evalData = d.data();
         let row: any = {
           "ลำดับ": index + 1,
-          "ชื่อ-นามสกุล": formatInstructorName(evalData.userName),
+          "ชื่อ-นามสกุล": formatRegName(evalData.userName, evalData.userEmail),
           "อีเมล": evalData.userEmail,
           "เวลาประเมิน": new Date(evalData.createdAt).toLocaleString('th-TH')
         };
@@ -629,7 +718,7 @@ export const RegistrantsList: React.FC = () => {
       "ลำดับการเช็คอิน": reg.checkInSequenceNumber || "-",
       "ลำดับ (ระบบ)": reg.sequenceNumber,
       "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
-      "ชื่อ-นามสกุล": formatInstructorName(reg.userName),
+      "ชื่อ-นามสกุล": formatRegName(reg.userName, reg.userEmail, reg.instructorId, reg.userPosition),
       "อีเมล": reg.userEmail,
       "หน่วยงาน": reg.userDepartment,
       "ตำแหน่ง": reg.userPosition,
@@ -687,7 +776,7 @@ export const RegistrantsList: React.FC = () => {
       name: "แอดมิน (ทดสอบ)"
     }] : selectedRegs.map(r => ({
       email: r.userEmail,
-      name: formatInstructorName(r.userName)
+      name: formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)
     }));
 
     const payload = {
@@ -743,12 +832,12 @@ export const RegistrantsList: React.FC = () => {
       .filter(r => evalSelectedIds.includes(r.id))
       .map(r => ({
         email: r.userEmail,
-        name: formatInstructorName(r.userName)
+        name: formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)
       }));
 
     const customRecipients = customEvalRecipients.map(r => ({
       email: r.email,
-      name: r.name
+      name: formatRegName(r.name, r.email)
     }));
 
     const recipients = [...attendeeRecipients, ...customRecipients];
@@ -818,6 +907,28 @@ export const RegistrantsList: React.FC = () => {
       }
     } catch (error) {
       toast.error("เกิดข้อผิดพลาด");
+    }
+  };
+
+  const handleToggleSessionAttendance = async (
+    regId: string, 
+    sessionId: string, 
+    currentStatus: boolean, 
+    sessionDate?: string, 
+    sessionName?: string
+  ) => {
+    try {
+      await RegistrationService.toggleSessionAttendance(
+        regId,
+        sessionId,
+        !currentStatus,
+        sessionDate,
+        sessionName
+      );
+      toast.success(!currentStatus ? "เช็คอินเรียบร้อย" : "ยกเลิกการเช็คอิน");
+    } catch (error) {
+      console.error("Toggle session attendance error:", error);
+      toast.error("เกิดข้อผิดพลาดในการปรับปรุงการเข้าอบรม");
     }
   };
 
@@ -1020,7 +1131,15 @@ export const RegistrantsList: React.FC = () => {
           </button>
           {selectedCourseId && (
             <button 
-              onClick={() => setShowQrModal(true)}
+              onClick={() => {
+                if (selectedCourse) {
+                  const s = getCourseSessions(selectedCourse);
+                  const today = new Date().toISOString().split("T")[0];
+                  const todayS = s.find(item => item.date === today);
+                  setSelectedQrSessionId(todayS?.id || s[0]?.id || "");
+                }
+                setShowQrModal(true);
+              }}
               className="flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-xl text-[13px] font-medium transition-all border border-indigo-100"
             >
               <QrCode className="w-4 h-4" />
@@ -1109,13 +1228,30 @@ export const RegistrantsList: React.FC = () => {
                       className="w-4 h-4 rounded text-crimson focus:ring-crimson cursor-pointer border-slate-300"
                     />
                   </th>
-                  <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับสมัคร</th>
-                  <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับเช็คอิน</th>
+                  <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับสมัคร</th>
+                  {!isMulti && (
+                    <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ลำดับเช็คอิน</th>
+                  )}
                   <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">รหัสอาจารย์</th>
                   <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">ชื่อ-นามสกุล</th>
                   <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">หน่วยงาน</th>
                   <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em]">อีเมล</th>
-                  <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em] text-center">สถานะ</th>
+                  
+                  {isMulti ? (
+                    <>
+                      {displaySessions.map((s, idx) => (
+                        <th key={s.id} className="px-4 py-5 text-[12px] lg:text-[13px] font-medium text-slate-500 uppercase tracking-wider text-center whitespace-nowrap">
+                          <div className="flex flex-col items-center">
+                            <span className="font-bold text-slate-700">{s.sessionName || `วันที่ ${idx + 1}`}</span>
+                            {s.date && <span className="text-[11px] text-slate-400 font-normal">{formatDateThai(s.date)}</span>}
+                          </div>
+                        </th>
+                      ))}
+                      <th className="px-6 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em] text-center">ภาพรวม</th>
+                    </>
+                  ) : (
+                    <th className="px-8 py-5 text-[12px] lg:text-[13px] font-medium text-slate-400 uppercase tracking-[0.2em] text-center">สถานะ</th>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
@@ -1131,74 +1267,143 @@ export const RegistrantsList: React.FC = () => {
                           className="w-4 h-4 rounded text-crimson focus:ring-crimson cursor-pointer border-slate-300"
                         />
                       </td>
-                      <td className="px-8 py-4">
+                      <td className="px-6 py-4">
                         <span className="text-[14px] lg:text-[16px] font-bold text-slate-300 group-hover:text-crimson transition-colors">
                           {String(displaySequenceNumber).padStart(2, '0')}
                         </span>
                       </td>
-                    <td className="px-8 py-4">
-                      {reg.checkInSequenceNumber ? (
-                        <span className="text-[14px] lg:text-[16px] font-bold text-emerald-500">
-                          {String(reg.checkInSequenceNumber).padStart(2, '0')}
-                        </span>
-                      ) : (
-                        <span className="text-[14px] lg:text-[16px] font-bold text-slate-200">
-                          -
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className="text-[12px] lg:text-[13px] font-mono font-medium text-slate-400">
-                        {reg.instructorId || instructorMap[reg.userEmail] || "-"}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="flex flex-col">
-                        <span className="text-[14px] lg:text-[16px] font-normal text-[#333333]">{formatInstructorName(reg.userName)}</span>
-                        <span className="text-[12px] text-slate-400 font-medium uppercase tracking-wider">{reg.userPosition}</span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className="text-[12px] lg:text-[13px] font-medium text-[#4A4A4A] bg-slate-100 px-3 py-1 rounded-full">
-                        {reg.userDepartment}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className="text-[12px] lg:text-[13px] font-normal text-slate-400">{reg.userEmail}</span>
-                    </td>
-                    <td className="px-8 py-4 text-center">
-                      <div className="flex items-center justify-center gap-2">
-                        <button 
-                          onClick={() => toggleAttendance(reg.id, reg.attended)}
-                          className={cn(
-                            "inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-[12px] font-medium uppercase tracking-widest transition-all",
-                            reg.attended 
-                              ? "bg-emerald-50 text-emerald-600 border border-emerald-100" 
-                              : "bg-slate-50 text-slate-400 border border-slate-100 hover:border-crimson/30 hover:text-crimson"
-                          )}
-                        >
-                          {reg.attended ? (
-                            <>
-                              <CheckCircle2 className="w-3 h-3" />
-                              มาอบรมจริง
-                            </>
+                      {!isMulti && (
+                        <td className="px-8 py-4">
+                          {reg.checkInSequenceNumber ? (
+                            <span className="text-[14px] lg:text-[16px] font-bold text-emerald-500">
+                              {String(reg.checkInSequenceNumber).padStart(2, '0')}
+                            </span>
                           ) : (
-                            <>
-                              <RefreshCw className="w-3 h-3" />
-                              ยังไม่ได้เช็คอิน
-                            </>
+                            <span className="text-[14px] lg:text-[16px] font-bold text-slate-200">
+                              -
+                            </span>
                           )}
-                        </button>
-                        <button
-                          onClick={() => handleDeleteClick(reg.id, reg.courseId, reg.sessionId || null)}
-                          className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
-                          title="ลบผู้ลงทะเบียน"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+                        </td>
+                      )}
+                      <td className="px-6 py-4">
+                        <span className="text-[12px] lg:text-[13px] font-mono font-medium text-slate-400">
+                          {reg.instructorId || instructorMap[reg.userEmail] || "-"}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-col">
+                          <span className="text-[14px] lg:text-[16px] font-normal text-[#333333]">
+                            {formatRegName(reg.userName, reg.userEmail, reg.instructorId, reg.userPosition)}
+                          </span>
+                          <span className="text-[12px] text-slate-400 font-medium uppercase tracking-wider">{reg.userPosition}</span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className="text-[12px] lg:text-[13px] font-medium text-[#4A4A4A] bg-slate-100 px-3 py-1 rounded-full">
+                          {reg.userDepartment}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className="text-[12px] lg:text-[13px] font-normal text-slate-400">{reg.userEmail}</span>
+                      </td>
+
+                      {isMulti ? (
+                        <>
+                          {displaySessions.map((s) => {
+                            const att = reg.attendedSessions?.[s.id];
+                            const isAttended = att?.attended ?? false;
+                            return (
+                              <td key={s.id} className="px-3 py-4 text-center">
+                                <button
+                                  onClick={() => handleToggleSessionAttendance(reg.id, s.id, isAttended, s.date, s.sessionName)}
+                                  title={isAttended ? `เช็คอินเมื่อ ${att?.checkInAt ? new Date(att.checkInAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '-'} (คลิกเพื่อยกเลิก)` : "คลิกเพื่อเช็คอิน"}
+                                  className={cn(
+                                    "inline-flex flex-col items-center justify-center px-3 py-1.5 rounded-xl text-[11px] font-semibold transition-all min-w-[76px]",
+                                    isAttended 
+                                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100" 
+                                      : "bg-slate-50 text-slate-400 border border-slate-200 hover:border-crimson/40 hover:text-crimson hover:bg-white"
+                                  )}
+                                >
+                                  <div className="flex items-center gap-1.5">
+                                    {isAttended ? (
+                                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                    ) : (
+                                      <RefreshCw className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>{isAttended ? "มาอบรม" : "ยังไม่เช็คอิน"}</span>
+                                  </div>
+                                  {isAttended && att?.checkInSequenceNumber && (
+                                    <span className="text-[10px] text-emerald-600 font-bold mt-0.5">
+                                      #{att.checkInSequenceNumber}
+                                    </span>
+                                  )}
+                                </button>
+                              </td>
+                            );
+                          })}
+                          <td className="px-6 py-4 text-center">
+                            <div className="flex items-center justify-center gap-2">
+                              {(() => {
+                                const attendedCount = displaySessions.filter(s => reg.attendedSessions?.[s.id]?.attended).length;
+                                const totalDays = displaySessions.length;
+                                const isAll = totalDays > 0 && attendedCount === totalDays;
+                                const isPartial = attendedCount > 0 && attendedCount < totalDays;
+                                return (
+                                  <span className={cn(
+                                    "px-3 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider",
+                                    isAll ? "bg-emerald-100 text-emerald-800 border border-emerald-200" :
+                                    isPartial ? "bg-amber-100 text-amber-800 border border-amber-200" :
+                                    "bg-slate-100 text-slate-500 border border-slate-200"
+                                  )}>
+                                    {attendedCount}/{totalDays} วัน
+                                  </span>
+                                );
+                              })()}
+                              <button
+                                onClick={() => handleDeleteClick(reg.id, reg.courseId, reg.sessionId || null)}
+                                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                                title="ลบผู้ลงทะเบียน"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </>
+                      ) : (
+                        <td className="px-8 py-4 text-center">
+                          <div className="flex items-center justify-center gap-2">
+                            <button 
+                              onClick={() => toggleAttendance(reg.id, reg.attended)}
+                              className={cn(
+                                "inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-[12px] font-medium uppercase tracking-widest transition-all",
+                                reg.attended 
+                                  ? "bg-emerald-50 text-emerald-600 border border-emerald-100" 
+                                  : "bg-slate-50 text-slate-400 border border-slate-100 hover:border-crimson/30 hover:text-crimson"
+                              )}
+                            >
+                              {reg.attended ? (
+                                <>
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  มาอบรมจริง
+                                </>
+                              ) : (
+                                <>
+                                  <RefreshCw className="w-3 h-3" />
+                                  ยังไม่ได้เช็คอิน
+                                </>
+                              )}
+                            </button>
+                            <button
+                              onClick={() => handleDeleteClick(reg.id, reg.courseId, reg.sessionId || null)}
+                              className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                              title="ลบผู้ลงทะเบียน"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
                   );
                 })}
               </tbody>
@@ -1222,8 +1427,8 @@ export const RegistrantsList: React.FC = () => {
               <X className="w-6 h-6 text-slate-300" />
             </button>
             
-            <div className="mb-8">
-              <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mx-auto mb-6">
+            <div className="mb-6">
+              <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mx-auto mb-4">
                 <QrCode className="w-10 h-10 text-indigo-600" />
               </div>
               <h3 className="text-2xl font-black text-slate-900 tracking-tight mb-2">QR Code Check-in</h3>
@@ -1232,13 +1437,64 @@ export const RegistrantsList: React.FC = () => {
               </p>
             </div>
 
-            <div className="bg-slate-50 p-8 rounded-[2.5rem] border border-slate-100 mb-8 flex justify-center">
-              <QRCodeSVG 
-                value={`${window.location.href.split('#')[0].replace(/\/$/, '')}/#/checkin/${selectedCourseId}`}
-                size={200}
-                level="H"
-                includeMargin={true}
-              />
+            {isMulti && displaySessions.length > 0 && (
+              <div className="mb-6 text-left">
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                  เลือกวันอบรมสำหรับ QR Code:
+                </label>
+                <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto p-1 bg-slate-50 rounded-2xl border border-slate-200">
+                  {displaySessions.map((s, idx) => {
+                    const isSelected = (selectedQrSessionId || displaySessions[0]?.id) === s.id;
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => setSelectedQrSessionId(s.id)}
+                        className={cn(
+                          "p-2.5 rounded-xl border text-left transition-all text-xs",
+                          isSelected
+                            ? "bg-indigo-600 border-indigo-600 text-white font-bold shadow-sm"
+                            : "bg-white border-slate-200 text-slate-700 hover:bg-slate-100"
+                        )}
+                      >
+                        <div className="truncate font-semibold">{s.sessionName || `วันที่ ${idx + 1}`}</div>
+                        {s.date && (
+                          <div className={cn("text-[10px] mt-0.5", isSelected ? "text-indigo-100" : "text-slate-400")}>
+                            {formatDateThai(s.date)}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="bg-slate-50 p-6 rounded-[2.5rem] border border-slate-100 mb-6 flex flex-col items-center justify-center">
+              {(() => {
+                const activeQrSession = isMulti 
+                  ? (displaySessions.find(s => s.id === selectedQrSessionId) || displaySessions[0]) 
+                  : null;
+                const qrCodeUrl = isMulti && activeQrSession
+                  ? `${window.location.href.split('#')[0].replace(/\/$/, '')}/#/checkin/${selectedCourseId}?sessionId=${activeQrSession.id}`
+                  : `${window.location.href.split('#')[0].replace(/\/$/, '')}/#/checkin/${selectedCourseId}`;
+
+                return (
+                  <>
+                    <QRCodeSVG 
+                      value={qrCodeUrl}
+                      size={200}
+                      level="H"
+                      includeMargin={true}
+                    />
+                    {isMulti && activeQrSession && (
+                      <div className="mt-3 text-xs font-bold text-indigo-700 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100">
+                        {activeQrSession.sessionName} {activeQrSession.date ? `(${formatDateThai(activeQrSession.date)})` : ""}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             <div className="space-y-4">
@@ -1460,7 +1716,7 @@ export const RegistrantsList: React.FC = () => {
                                   )}
                                 </td>
                                 <td className="px-4 py-3 font-black text-indigo-600">{index + 1}</td>
-                                <td className="px-4 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
+                                <td className="px-4 py-3 font-bold text-slate-700">{formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)}</td>
                                 <td className="px-4 py-3 text-slate-500 text-xs">{r.userEmail}</td>
                                 <td className="px-4 py-3 text-center">
                                   {r.certStatus === 'sent' ? (
@@ -1496,7 +1752,7 @@ export const RegistrantsList: React.FC = () => {
                                   {certRecipients.length + index + 1}
                                 </td>
                                 <td className="px-4 py-3 font-bold text-slate-700 flex items-center gap-2">
-                                  {formatInstructorName(r.name)}
+                                  {formatRegName(r.name, r.email)}
                                   <span className="text-[9px] bg-amber-100 text-amber-700 px-1.5 rounded-full font-bold uppercase">Manual</span>
                                 </td>
                                 <td className="px-4 py-3 text-slate-500 text-xs">{r.email}</td>
@@ -1561,8 +1817,8 @@ export const RegistrantsList: React.FC = () => {
                                 <td className="px-5 py-3">
                                   <span className="bg-slate-100 text-slate-700 px-2 py-1 rounded-lg font-mono text-xs font-bold">{globalIndex + 1}.png</span>
                                 </td>
-                                <td className="px-5 py-3 font-bold text-slate-700">{formatInstructorName(r.userName)}</td>
-                                <td className="px-5 py-3 text-slate-500 italic">เรียน {formatInstructorName(r.userName)}...</td>
+                                <td className="px-5 py-3 font-bold text-slate-700">{formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)}</td>
+                                <td className="px-5 py-3 text-slate-500 italic">เรียน {formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)}...</td>
                                 <td className="px-5 py-3 text-indigo-600 font-medium">{r.userEmail}</td>
                               </tr>
                             );
@@ -1573,8 +1829,8 @@ export const RegistrantsList: React.FC = () => {
                                 <td className="px-5 py-3">
                                   <span className="bg-amber-100 text-amber-700 px-2 py-1 rounded-lg font-mono text-xs font-bold">{certRecipients.length + index + 1}.png</span>
                                 </td>
-                                <td className="px-5 py-3 font-bold text-slate-700">{formatInstructorName(r.name)}</td>
-                                <td className="px-5 py-3 text-slate-500 italic">เรียน {formatInstructorName(r.name)}...</td>
+                                <td className="px-5 py-3 font-bold text-slate-700">{formatRegName(r.name, r.email)}</td>
+                                <td className="px-5 py-3 text-slate-500 italic">เรียน {formatRegName(r.name, r.email)}...</td>
                                 <td className="px-5 py-3 text-indigo-600 font-medium">{r.email}</td>
                               </tr>
                             );
@@ -1813,7 +2069,7 @@ export const RegistrantsList: React.FC = () => {
                             className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer border-slate-300"
                           />
                           <div className="flex flex-col flex-1">
-                            <span className="text-sm font-bold text-slate-700">{formatInstructorName(r.userName)}</span>
+                            <span className="text-sm font-bold text-slate-700">{formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)}</span>
                             <span className="text-[11px] text-slate-500">{r.userEmail}</span>
                           </div>
                         </div>
@@ -1904,7 +2160,7 @@ export const RegistrantsList: React.FC = () => {
                           className="w-full h-full min-h-[250px] px-4 py-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none transition-all text-sm resize-none"
                         />
                         <p className="text-[11px] text-slate-400 mt-2">
-                          * ส่วนหัวจะขึ้นต้นให้อัตโนมัติด้วย: <b>เรียน คุณ [ชื่อผู้รับ]</b><br/>
+                          * ส่วนหัวจะขึ้นต้นให้อัตโนมัติด้วย: <b>เรียน [ชื่อผู้รับพร้อมคำนำหน้าตามรหัสอาจารย์ เช่น อ./ผศ./ดร./คุณ]</b><br/>
                           * ส่วนท้ายจะลงนามปิดให้อัตโนมัติด้วย: <b>สำนักพัฒนาการเรียนรู้ (Learning Development Office) มหาวิทยาลัยกรุงเทพ</b>
                         </p>
                       </div>
@@ -1934,7 +2190,7 @@ export const RegistrantsList: React.FC = () => {
                           >
                             <div className="flex flex-col">
                               <span className={cn("text-sm font-bold", isSelected ? "text-slate-800" : "text-slate-500")}>
-                                {formatInstructorName(r.userName)}
+                                {formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)}
                               </span>
                               <span className="text-xs text-slate-500">{r.userEmail}</span>
                             </div>

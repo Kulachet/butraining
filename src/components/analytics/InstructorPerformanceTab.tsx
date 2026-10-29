@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { AnalyticsData, getRatingsArray } from "./types";
 import { UserCheck, Award, MessageCircle } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Cell } from "recharts";
+import { formatInstructorName } from "../../lib/utils";
 
 export const InstructorPerformanceTab: React.FC<{ data: AnalyticsData }> = ({ data }) => {
   const instructorStats = useMemo(() => {
@@ -10,7 +11,9 @@ export const InstructorPerformanceTab: React.FC<{ data: AnalyticsData }> = ({ da
     const statsMap: Record<string, any> = {};
 
     data.courses.forEach(course => {
-      const instructorName = course.instructorName || "ไม่ระบุวิทยากร";
+      const instructorName = course.instructorName 
+        ? formatInstructorName(course.instructorName, course.instructorId) 
+        : "ไม่ระบุวิทยากร";
       if (!statsMap[instructorName]) {
         statsMap[instructorName] = {
           name: instructorName,

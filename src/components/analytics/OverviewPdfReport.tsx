@@ -1,6 +1,7 @@
 import React from "react";
 import { Course } from "../../types";
 import { EvaluationAnalysisResult, CourseOperationalStats } from "../../lib/evaluationAnalytics";
+import { formatInstructorName } from "../../lib/utils";
 
 // Dedicated PDF-Safe Colors (Strictly Hex/RGB to prevent html2canvas OKLCH parse errors)
 export const PDF_COLORS = {
@@ -114,7 +115,7 @@ export const OverviewPdfReport: React.FC<OverviewPdfReportProps> = ({
               style={{ color: PDF_COLORS.textMuted }}
             >
               <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>วันที่อบรม:</span> {course.date || "ไม่ระบุ"}</p>
-              <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>วิทยากร:</span> {course.instructorName || "ไม่ระบุ"}</p>
+              <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>วิทยากร:</span> {course.instructorName ? formatInstructorName(course.instructorName, course.instructorId) : "ไม่ระบุ"}</p>
               <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>วันที่ออกรายงาน:</span> {currentDateStr}</p>
               <p><span className="font-semibold" style={{ color: PDF_COLORS.textPrimary }}>เกณฑ์คะแนน:</span> คะแนนเต็ม 5.00</p>
             </div>

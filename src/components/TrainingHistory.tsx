@@ -315,7 +315,7 @@ export const TrainingHistory: React.FC<Props> = ({ onViewApplicants }) => {
                 </div>
                 <div className="flex items-center gap-2 text-[#4A4A4A] font-normal text-[13px] lg:text-[14px] tracking-wide leading-[1.6]">
                   <span className="text-slate-400">Instructor:</span>
-                  {formatInstructorName(course.instructorName)}
+                  {formatInstructorName(course.instructorName, course.instructorId)}
                 </div>
                 <div className="flex items-center gap-2 text-slate-600 font-medium text-[13px] lg:text-[14px] tracking-wide leading-[1.6] bg-slate-100 w-fit px-3 py-1.5 rounded-lg mt-2">
                   <Calendar className="w-4 h-4 text-slate-500" />

@@ -18,11 +18,21 @@ import {
   Loader2,
   BookOpen,
   RefreshCw,
-  Archive
+  Archive,
+  Clock
 } from "lucide-react";
 import toast from "react-hot-toast";
-import { cn, formatInstructorName } from "../lib/utils";
+import { 
+  cn, 
+  formatInstructorName, 
+  formatDateThai, 
+  formatDateLocalized,
+  formatSessionTime,
+  getCourseSessions,
+  isMultiDayCourse 
+} from "../lib/utils";
 import { useAuth } from "./AuthProvider";
+import { useLanguage } from "../contexts/LanguageContext";
 
 interface Props {
   onCreateCourse: () => void;
@@ -32,6 +42,7 @@ interface Props {
 
 export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, onViewApplicants }) => {
   const { user, isAdmin } = useAuth();
+  const { lang } = useLanguage();
   const [courses, setCourses] = useState<Course[]>([]);
   const [instructors, setInstructors] = useState<Instructor[]>([]);
   const [loading, setLoading] = useState(true);
@@ -76,6 +87,15 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
     return Array.from(depts).filter(Boolean);
   }, [instructors]);
 
+  const instructorMap = useMemo(() => {
+    const map = new Map<string, Instructor>();
+    instructors.forEach((i) => {
+      if (i.name) map.set(i.name.trim(), i);
+      if (i.id) map.set(i.id.trim(), i);
+    });
+    return map;
+  }, [instructors]);
+
   // Active courses: not archived (or archived === false / undefined)
   const activeCourses = useMemo(() => {
     return courses.filter(c => !c.archived);
@@ -112,12 +132,18 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
       result = result.filter(c => c.department === deptFilter);
     }
 
-    // Date Range (Simplified check)
+    // Date Range
     if (startDate) {
-      result = result.filter(c => new Date(c.date) >= new Date(startDate));
+      result = result.filter(c => {
+        const d = c.date || (c.sessions && c.sessions[0]?.date);
+        return d ? d >= startDate : false;
+      });
     }
     if (endDate) {
-      result = result.filter(c => new Date(c.date) <= new Date(endDate));
+      result = result.filter(c => {
+        const d = c.date || (c.sessions && c.sessions[0]?.date);
+        return d ? d <= endDate : false;
+      });
     }
 
     // Sort
@@ -126,9 +152,17 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
     } else if (sortBy === "Title Z-A") {
       result.sort((a, b) => (b.title || "").localeCompare(a.title || ""));
     } else if (sortBy === "Training Date (Earliest)") {
-      result.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      result.sort((a, b) => {
+        const da = a.date || (a.sessions && a.sessions[0]?.date) || "";
+        const db = b.date || (b.sessions && b.sessions[0]?.date) || "";
+        return da.localeCompare(db);
+      });
     } else if (sortBy === "Training Date (Latest)") {
-      result.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      result.sort((a, b) => {
+        const da = a.date || (a.sessions && a.sessions[0]?.date) || "";
+        const db = b.date || (b.sessions && b.sessions[0]?.date) || "";
+        return db.localeCompare(da);
+      });
     } else {
       // Latest Added
       result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -340,7 +374,14 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
           className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[14px] lg:text-[16px] font-normal text-[#4A4A4A] focus:ring-2 focus:ring-crimson outline-none transition-all appearance-none cursor-pointer"
         >
           <option>All Instructors</option>
-          {uniqueInstructors.map(name => <option key={name} value={name}>{formatInstructorName(name)}</option>)}
+          {uniqueInstructors.map(name => {
+            const inst = instructorMap.get(name);
+            return (
+              <option key={name} value={name}>
+                {formatInstructorName(name, inst?.id, inst?.position)}
+              </option>
+            );
+          })}
         </select>
 
         <div className="flex gap-2">
@@ -417,29 +458,103 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
                     {course.title}
                   </h3>
                   <div className="flex items-center gap-2">
-                    {course.isVisible ? (
-                      <span className="bg-green-50 text-green-600 text-[10px] font-medium px-2 py-0.5 rounded-full border border-green-100 flex items-center gap-1 tracking-widest uppercase">
-                        <Eye className="w-3 h-3" /> Public
-                      </span>
-                    ) : (
-                      <span className="bg-slate-50 text-slate-400 text-[10px] font-medium px-2 py-0.5 rounded-full border border-slate-100 flex items-center gap-1 tracking-widest uppercase">
-                        <Eye className="w-3 h-3 opacity-50" /> Hidden
-                      </span>
-                    )}
+                    <button
+                      type="button"
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        try {
+                          const newVis = !course.isVisible;
+                          await updateDoc(doc(db, "courses", course.id), {
+                            isVisible: newVis,
+                            multiDayPublicationBlocked: false
+                          });
+                          toast.success(newVis ? "แสดงหลักสูตรบนหน้าหลักแล้ว" : "ซ่อนหลักสูตรจากหน้าหลักแล้ว");
+                        } catch (err) {
+                          console.error("Visibility toggle error:", err);
+                          toast.error("ไม่สามารถเปลี่ยนสถานะการมองเห็นได้");
+                        }
+                      }}
+                      title="คลิกเพื่อสลับสถานะการแสดงผลบนหน้าหลัก (Public / Hidden)"
+                      className="cursor-pointer transition-transform hover:scale-105 active:scale-95"
+                    >
+                      {course.isVisible ? (
+                        <span className="bg-green-50 text-green-600 text-[10px] font-medium px-2 py-0.5 rounded-full border border-green-100 flex items-center gap-1 tracking-widest uppercase hover:bg-green-100">
+                          <Eye className="w-3 h-3" /> Public
+                        </span>
+                      ) : (
+                        <span className="bg-slate-50 text-slate-400 text-[10px] font-medium px-2 py-0.5 rounded-full border border-slate-100 flex items-center gap-1 tracking-widest uppercase hover:bg-slate-100">
+                          <Eye className="w-3 h-3 opacity-50" /> Hidden
+                        </span>
+                      )}
+                    </button>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 text-[#4A4A4A] font-normal text-[13px] lg:text-[14px] tracking-wide leading-[1.6]">
                   <span className="text-slate-400">Instructor:</span>
-                  {formatInstructorName(course.instructorName)}
-                </div>
-                <div className="flex items-center gap-2 text-crimson font-medium text-[13px] lg:text-[14px] tracking-wide leading-[1.6] bg-crimson/5 w-fit px-3 py-1.5 rounded-lg mt-2">
-                  <Calendar className="w-4 h-4" />
-                  {course.sessions && course.sessions.length > 0 ? (
-                    <span>{course.sessions.length} Sessions | เริ่ม: {course.sessions[0].date}</span>
-                  ) : (
-                    <span>วันที่อบรม: {course.date}</span>
+                  {formatInstructorName(
+                    course.instructorName, 
+                    course.instructorId || instructorMap.get(course.instructorName)?.id,
+                    instructorMap.get(course.instructorName)?.position
                   )}
                 </div>
+                {(() => {
+                  const courseSessions = getCourseSessions(course);
+                  const isMulti = courseSessions.length > 1;
+
+                  if (isMulti) {
+                    return (
+                      <div className="mt-2.5 space-y-1.5 bg-crimson/5 rounded-xl p-3 border border-crimson/10 text-xs">
+                        <div className="flex items-center justify-between gap-1 border-b border-crimson/10 pb-1.5 text-crimson font-bold text-xs">
+                          <span className="flex items-center gap-1.5">
+                            <Calendar className="w-3.5 h-3.5 text-crimson shrink-0" />
+                            {lang === 'en' 
+                              ? `Training Schedule (${courseSessions.length} Days)` 
+                              : `กำหนดการอบรม (${courseSessions.length} วัน)`}
+                          </span>
+                        </div>
+                        <div className="space-y-1.5 pt-0.5">
+                          {courseSessions.map((session, idx) => (
+                            <div 
+                              key={session.id || idx}
+                              className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 bg-white/95 px-2.5 py-1.5 rounded-lg border border-slate-100 shadow-2xs"
+                            >
+                              <div className="flex items-center gap-1.5">
+                                <span className="w-4 h-4 rounded-full bg-crimson text-white text-[9px] font-bold flex items-center justify-center shrink-0">
+                                  {idx + 1}
+                                </span>
+                                <span className="font-semibold text-slate-800 text-[11px] lg:text-xs">
+                                  {formatDateLocalized(session.date, lang)}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1 text-slate-600 text-[11px] font-medium pl-5 sm:pl-0 shrink-0">
+                                <Clock className="w-3 h-3 text-crimson/70 shrink-0" />
+                                <span>{formatSessionTime(session.startTime, session.endTime, lang)}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const singleSession = courseSessions[0];
+                  const singleDate = singleSession?.date || course.date;
+                  const singleStartTime = singleSession?.startTime || course.startTime;
+                  const singleEndTime = singleSession?.endTime || course.endTime;
+
+                  return (
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-crimson font-medium text-[12px] lg:text-[13px] tracking-wide leading-[1.6] bg-crimson/5 w-fit px-3 py-1.5 rounded-lg mt-2 border border-crimson/10">
+                      <Calendar className="w-4 h-4 shrink-0" />
+                      <span>{lang === 'en' ? "Date:" : "วันที่อบรม:"} {formatDateLocalized(singleDate, lang)}</span>
+                      {(singleStartTime || singleEndTime) && (
+                        <span className="text-slate-600 font-normal text-xs flex items-center gap-1 pl-1 border-l border-crimson/20">
+                          <Clock className="w-3 h-3 text-crimson/70 shrink-0" />
+                          {formatSessionTime(singleStartTime, singleEndTime, lang)}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Column 2: Stats */}
@@ -448,18 +563,29 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
                   <span className="text-[11px] font-medium text-slate-400 uppercase tracking-widest leading-[1.6]">Total Seats</span>
                   <span className="text-[13px] lg:text-[14px] font-normal text-[#4A4A4A] tracking-wide leading-[1.7]">
                     {(() => {
+                      const isMulti = isMultiDayCourse(course);
                       const hasSessions = course.sessions && course.sessions.length > 0;
-                      const totalEnrolled = hasSessions 
-                        ? course.sessions!.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0) 
-                        : (course.enrolledSeats || 0);
-                      const totalMax = hasSessions 
-                        ? course.sessions!.reduce((sum, s) => sum + (s.maxSeats || 0), 0) 
-                        : (course.maxSeats || 50);
+                      let totalEnrolled = 0;
+                      let totalMax = course.maxSeats || 50;
+
+                      if (isMulti) {
+                        // Multi-day workshop: learners enroll once for the entire workshop cohort
+                        totalEnrolled = course.enrolledSeats ?? course.totalRegistrations ?? (hasSessions ? (course.sessions![0]?.enrolledSeats || 0) : 0);
+                        totalMax = course.maxSeats || (hasSessions ? (course.sessions![0]?.maxSeats || 50) : 50);
+                      } else {
+                        totalEnrolled = hasSessions 
+                          ? course.sessions!.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0) 
+                          : (course.enrolledSeats || 0);
+                        totalMax = hasSessions 
+                          ? course.sessions!.reduce((sum, s) => sum + (s.maxSeats || 0), 0) 
+                          : (course.maxSeats || 50);
+                      }
+
                       return (
                         <>
                           {totalEnrolled}/{totalMax} 
                           <span className="text-slate-400 ml-1 font-normal">
-                            ({Math.round((totalEnrolled / totalMax) * 100)}%)
+                            ({totalMax > 0 ? Math.round((totalEnrolled / totalMax) * 100) : 0}%)
                           </span>
                         </>
                       );
