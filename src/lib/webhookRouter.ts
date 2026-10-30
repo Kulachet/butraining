@@ -9,9 +9,9 @@ export const DEFAULT_THAI_GAS_URL =
   "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
 
 /**
- * Secure Netlify Function endpoint for English course notifications.
+ * Secure direct Netlify Function endpoint for English course notifications.
  */
-export const SECURE_EN_GATEWAY_ENDPOINT = "/api/notify-registration-en";
+export const SECURE_EN_GATEWAY_ENDPOINT = "/.netlify/functions/notify-registration-en";
 
 export type SupportedLanguage = "th" | "en";
 
@@ -53,7 +53,7 @@ export function resolveWebhookLanguage(
  *
  * ROUTING ARCHITECTURE (Phase 2B.1.3):
  * 1. English Courses (course.language === 'en'):
- *    - Routed strictly through the server-side Netlify Function (/api/notify-registration-en).
+ *    - Routed strictly through the server-side Netlify Function (/.netlify/functions/notify-registration-en).
  *    - Direct browser-to-GAS calls are completely removed for English courses.
  *    - Requires valid Firebase ID token for authentication.
  * 2. Thai Courses (course.language === 'th' or missing/legacy):
@@ -89,7 +89,7 @@ export function resolveRegistrationWebhook(
 /**
  * Dispatches the registration notification.
  *
- * - English courses: calls the secure Netlify Function /api/notify-registration-en
+ * - English courses: calls the secure Netlify Function /.netlify/functions/notify-registration-en
  *   with the user's Firebase ID token. The server verifies the registration in Firestore
  *   and issues a server-to-server call to GAS with a shared secret.
  * - Thai courses: dispatches directly to the deployed Thai GAS endpoint using no-cors.
