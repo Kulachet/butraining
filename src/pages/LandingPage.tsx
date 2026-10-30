@@ -13,6 +13,7 @@ import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { cn, generateGoogleCalendarUrl, formatInstructorName, formatSessionTime, formatSessionName, isMultiDayCourse } from "../lib/utils";
 import { buildRegistrationEmailPayload } from "../lib/registrationEmail";
+import { resolveRegistrationWebhook, dispatchRegistrationWebhook } from "../lib/webhookRouter";
 import { useLanguage, resolveCourseLang, courseTranslations } from "../contexts/LanguageContext";
 import { LanguageSwitcher } from "../components/LanguageSwitcher";
 
@@ -158,37 +159,63 @@ export const LandingPage: React.FC = () => {
       const isMulti = isMultiDayCourse(course);
       toast.success(ct.registrationSuccess);
       
-      // Auto-send Calendar Invite and Localized Confirmation Email via GAS
-      const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
+      // Auto-send Calendar Invite and Localized Confirmation Email via webhook gateway
+      let idToken: string | undefined = undefined;
+      try {
+        if (user) {
+          idToken = await user.getIdToken();
+        }
+      } catch (tokenErr) {
+        console.warn("Could not retrieve Firebase ID token:", tokenErr);
+      }
+
       const payload = buildRegistrationEmailPayload({
         course,
         instructor: instructor!,
         session
       });
 
-      fetch(gasUrl, {
-        method: "POST",
-        mode: "no-cors", // Add no-cors to bypass strict CORS on Netlify
-        headers: {
-          "Content-Type": "text/plain;charset=utf-8",
-        },
-        body: JSON.stringify(payload)
+      dispatchRegistrationWebhook(course, payload, {
+        idToken,
+        sessionId: session?.sessionId,
       })
-      .then(() => {
-        if (isMulti) {
-          toast.success(ct.calendarSentMulti, { duration: 6000 });
-        } else {
-          toast.success(ct.calendarSentSingle);
-        }
-      })
-      .catch(err => {
-        console.error("Calendar fetch error:", err);
-        toast.error(
-          courseLang === 'en'
-            ? "Could not send automated Calendar invitation. Your registration remains confirmed."
-            : "ไม่สามารถส่งคำเชิญลงปฏิทินอัตโนมัติได้ (การลงทะเบียนของท่านยังคงสมบูรณ์)"
-        );
-      });
+        .then((res) => {
+          if (res.status === "unconfigured") {
+            toast(
+              courseLang === 'en'
+                ? (res.message || "Registration confirmed. Automated English email and calendar service is not yet configured on this environment.")
+                : "ลงทะเบียนสำเร็จ (ระบบส่งอีเมลยืนยันภาษาอังกฤษยังไม่ได้รับการกำหนดค่า)",
+              { icon: 'ℹ️', duration: 6000 }
+            );
+          } else if (res.status === "partial_success") {
+            toast(
+              courseLang === 'en'
+                ? (res.message || "Registration confirmed. Calendar invitation created, but confirmation email could not be sent.")
+                : "ลงทะเบียนสำเร็จ (ส่งคำเชิญปฏิทินแล้ว แต่อีเมลยืนยันขัดข้อง)",
+              { icon: '⚠️', duration: 7000 }
+            );
+          } else if (res.success) {
+            if (isMulti) {
+              toast.success(ct.calendarSentMulti, { duration: 6000 });
+            } else {
+              toast.success(ct.calendarSentSingle);
+            }
+          } else {
+            toast.error(
+              courseLang === 'en'
+                ? "Could not send automated Calendar invitation. Your registration remains confirmed."
+                : "ไม่สามารถส่งคำเชิญลงปฏิทินอัตโนมัติได้ (การลงทะเบียนของท่านยังคงสมบูรณ์)"
+            );
+          }
+        })
+        .catch(err => {
+          console.error("Calendar dispatch error:", err);
+          toast.error(
+            courseLang === 'en'
+              ? "Could not send automated Calendar invitation. Your registration remains confirmed."
+              : "ไม่สามารถส่งคำเชิญลงปฏิทินอัตโนมัติได้ (การลงทะเบียนของท่านยังคงสมบูรณ์)"
+          );
+        });
 
       setSelectedCourseForSession(null);
     } catch (error: any) {

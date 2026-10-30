@@ -58,6 +58,7 @@ export interface RegistrationEmailPayload {
   scheduleText: string;
   senderName: string;
   sessions: LocalizedSessionItem[];
+  idempotencyKey?: string;
 }
 
 export interface BuildEmailParams {
@@ -369,6 +370,14 @@ export function buildRegistrationEmailPayload({
 
   const senderName = isEn ? "Learning Development Office" : "สำนักพัฒนาการเรียนรู้";
 
+  // 8. Deterministic idempotency key for GAS deduplication
+  const targetSessionId =
+    (session && ('id' in session ? (session as any).id : 'sessionId' in session ? (session as any).sessionId : undefined)) ||
+    localizedSessions[0]?.id ||
+    'default';
+  const instructorKey = instructor.uid || instructor.id || instructor.email;
+  const idempotencyKey = `reg_${course.id || 'course'}_${targetSessionId}_${instructorKey}`;
+
   return {
     // Legacy fields
     courseTitle: course.title,
@@ -396,5 +405,6 @@ export function buildRegistrationEmailPayload({
     scheduleText,
     senderName,
     sessions: localizedSessions,
+    idempotencyKey,
   };
 }
