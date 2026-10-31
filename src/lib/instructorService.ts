@@ -19,6 +19,8 @@ export interface InstructorFormData {
   email: string;
   department: string;
   position?: string;
+  englishFullName?: string;
+  englishNameVerified?: boolean;
 }
 
 export interface ValidationResult {
@@ -117,12 +119,14 @@ export const InstructorService = {
     }
 
     const now = new Date().toISOString();
+    const cleanEnglishName = (data.englishFullName || "").trim();
     const newInstructor: Instructor = {
       id: cleanId,
       name: cleanName,
       email: cleanEmail,
       department: cleanDept,
       position: cleanPosition,
+      ...(cleanEnglishName ? { englishFullName: cleanEnglishName, englishNameVerified: Boolean(data.englishNameVerified) } : {}),
       isManual: true,
       createdAt: now,
       updatedAt: now,
@@ -146,6 +150,7 @@ export const InstructorService = {
     const cleanName = data.name.trim();
     const cleanDept = data.department.trim();
     const cleanPosition = (data.position || "").trim();
+    const cleanEnglishName = (data.englishFullName || "").trim();
     const now = new Date().toISOString();
 
     const isIdChanged = oldId !== newId;
@@ -159,6 +164,9 @@ export const InstructorService = {
         email: cleanEmail,
         department: cleanDept,
         position: cleanPosition,
+        ...(cleanEnglishName 
+          ? { englishFullName: cleanEnglishName, englishNameVerified: Boolean(data.englishNameVerified) } 
+          : { englishFullName: "", englishNameVerified: false }),
         isManual: true,
         updatedAt: now,
       };
@@ -215,6 +223,9 @@ export const InstructorService = {
       isManual: true,
       createdAt: originalInstructor.createdAt || now,
       updatedAt: now,
+      ...(cleanEnglishName 
+        ? { englishFullName: cleanEnglishName, englishNameVerified: Boolean(data.englishNameVerified) } 
+        : { englishFullName: "", englishNameVerified: false }),
       ...(originalInstructor.uid ? { uid: originalInstructor.uid } : {}),
     };
 

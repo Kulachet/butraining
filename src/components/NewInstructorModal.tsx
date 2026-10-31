@@ -8,6 +8,7 @@ import { X, UserPlus } from "lucide-react";
 const schema = z.object({
   id: z.string().min(2, "กรุณากรอกรหัสประจำตัวอาจารย์"),
   name: z.string().min(2, "กรุณากรอกชื่อ-นามสกุล"),
+  englishFullName: z.string().optional(),
   position: z.string().min(2, "กรุณากรอกตำแหน่งทางวิชาการ"),
   department: z.string().min(2, "กรุณากรอกคณะ/ภาควิชา"),
 });
@@ -73,6 +74,17 @@ export const NewInstructorModal: React.FC<Props> = ({ isOpen, onClose, onSubmit 
                   placeholder="เช่น ผศ.ดร. สมชาย ใจดี"
                 />
                 {errors.name && <p className="text-xs text-red-500 font-light">{errors.name.message}</p>}
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-light text-slate-500 tracking-wide">
+                  ชื่อ-นามสกุลภาษาอังกฤษ <span className="text-slate-400 text-xs">(ถ้ามี สำหรับหลักสูตรภาษาอังกฤษ)</span>
+                </label>
+                <input
+                  {...register("englishFullName")}
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl focus:ring-2 focus:ring-crimson focus:border-transparent outline-none transition-all font-light tracking-wide"
+                  placeholder="เช่น Asst. Prof. Dr. Somchai Jaidee"
+                />
               </div>
 
               <div className="space-y-2">

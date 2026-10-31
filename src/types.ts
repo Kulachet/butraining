@@ -6,6 +6,8 @@ export interface Instructor {
   email: string;
   position?: string;
   department: string;
+  englishFullName?: string;
+  englishNameVerified?: boolean;
   createdAt?: string;
   updatedAt?: string;
   isManual?: boolean;
@@ -87,6 +89,8 @@ export interface Registration {
   userId: string;
   instructorId?: string;
   userName: string;
+  userEnglishName?: string;
+  userEnglishNameVerified?: boolean;
   userEmail: string;
   userPosition: string;
   userDepartment: string;

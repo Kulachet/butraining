@@ -84,6 +84,8 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
           email: instructorToEdit.email || "",
           department: instructorToEdit.department || "",
           position: instructorToEdit.position || "",
+          englishFullName: instructorToEdit.englishFullName || "",
+          englishNameVerified: instructorToEdit.englishNameVerified === true,
         });
       } else {
         setFormData({
@@ -92,6 +94,8 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
           email: "",
           department: "",
           position: "",
+          englishFullName: "",
+          englishNameVerified: false,
         });
       }
       setErrors({});
@@ -285,6 +289,43 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
                 />
                 {errors.name && (
                   <p className="text-xs text-red-500 font-medium pl-1">{errors.name}</p>
+                )}
+              </div>
+
+              {/* Row 2B: English Full Name (Optional) */}
+              <div className="space-y-1.5">
+                <label className="text-xs sm:text-sm font-semibold text-slate-700 flex items-center justify-between">
+                  <span className="flex items-center gap-2">
+                    <User className="w-4 h-4 text-slate-400" />
+                    ชื่อ-นามสกุล ภาษาอังกฤษ (English Name) <span className="text-slate-400 font-normal">(ถ้ามี)</span>
+                  </span>
+                  <span className="text-[11px] text-slate-400">สำหรับอีเมลยืนยันหลักสูตรภาษาอังกฤษ</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.englishFullName || ""}
+                  onChange={(e) => handleChange("englishFullName", e.target.value)}
+                  placeholder="เช่น Asst. Prof. Dr. Somchai Jaidee"
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-[14px] sm:text-[15px] text-[#333333] font-medium outline-none transition-all focus:border-crimson focus:ring-2 focus:ring-crimson/10"
+                  disabled={submitting}
+                />
+                <p className="text-[11px] text-slate-400 pl-1">
+                  ใช้สำหรับระบุชื่อในอีเมลยืนยันการลงทะเบียนหลักสูตรภาษาอังกฤษ (หากเว้นว่าง ระบบจะใช้ &quot;Dear Faculty Member&quot;)
+                </p>
+                {formData.englishFullName && formData.englishFullName.trim().length > 0 && (
+                  <label className="flex items-center gap-2.5 mt-2 cursor-pointer select-none text-xs text-slate-700 bg-slate-100/80 hover:bg-slate-100 p-3 rounded-xl border border-slate-200 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(formData.englishNameVerified)}
+                      onChange={(e) => setFormData(prev => ({ ...prev, englishNameVerified: e.target.checked }))}
+                      className="rounded border-slate-300 text-crimson focus:ring-crimson w-4 h-4"
+                      disabled={submitting}
+                    />
+                    <div>
+                      <span className="font-semibold text-slate-800">อนุมัติการยืนยันชื่อภาษาอังกฤษ (Admin Verified)</span>
+                      <p className="text-[11px] text-slate-500 m-0">อนุญาตให้ระบบใช้นามสกุล/ชื่อภาษาอังกฤษนี้ในอีเมลทางการแทน &quot;Dear Faculty Member&quot;</p>
+                    </div>
+                  </label>
                 )}
               </div>
 

@@ -150,8 +150,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const registerInstructor = async (data: Omit<Instructor, 'uid' | 'email' | 'createdAt'>) => {
     if (!user) return;
     try {
+      const cleanEnglishName = (data.englishFullName || "").trim();
       const newInstructor: Instructor = {
         ...data,
+        englishFullName: cleanEnglishName || undefined,
+        englishNameVerified: false, // Self-registered names must remain unverified by default
         uid: user.uid,
         email: user.email!,
         createdAt: new Date().toISOString(),

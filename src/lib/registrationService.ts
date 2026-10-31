@@ -127,6 +127,9 @@ export const RegistrationService = {
         userId: instructor.uid,
         instructorId: instructor.id,
         userName: instructor.name,
+        ...(instructor.englishFullName ? { 
+          userEnglishName: instructor.englishFullName.trim(),
+        } : {}),
         userEmail: instructor.email,
         userPosition: instructor.position || "",
         userDepartment: instructor.department,

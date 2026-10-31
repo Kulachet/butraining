@@ -192,7 +192,8 @@ function handleEnglishRegistration(data) {
     var rawRecipient = data.recipientName || data.guestName || data.name || "Faculty Member";
     var cleanedRecipient = cleanEnglishRecipientName(rawRecipient);
 
-    var speakerName = (data.instructorName || "").trim();
+    var rawSpeaker = (data.instructorName || "").trim();
+    var speakerName = (rawSpeaker && !/[\u0E00-\u0E7F]/.test(rawSpeaker)) ? cleanEnglishRecipientName(rawSpeaker) : "";
     var location = data.location || "Bangkok University (On-site)";
     var dateStr = data.date; // ISO "YYYY-MM-DD"
     var startTime = data.startTime || "09:00";
@@ -302,12 +303,109 @@ function handleEnglishRegistration(data) {
   }
 }
 
+var EN_WEEKDAYS_GAS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday"
+];
+
+var EN_MONTHS_GAS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December"
+];
+
+function parseDatePartsGas(dateStr) {
+  if (!dateStr || typeof dateStr !== "string") return null;
+  var match = dateStr.trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (match) {
+    var year = parseInt(match[1], 10);
+    var month = parseInt(match[2], 10);
+    var day = parseInt(match[3], 10);
+    var d = new Date(year, month - 1, day, 12, 0, 0);
+    return { year: year, month: month, day: day, dayOfWeek: d.getDay() };
+  }
+  var d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate(), dayOfWeek: d.getDay() };
+}
+
+function formatDateEnGas(dateStr) {
+  if (!dateStr) return "";
+  var parts = parseDatePartsGas(dateStr);
+  if (!parts) return String(dateStr);
+  var weekday = EN_WEEKDAYS_GAS[parts.dayOfWeek] || "";
+  var month = EN_MONTHS_GAS[parts.month - 1] || "";
+  return weekday + ", " + month + " " + parts.day + ", " + parts.year;
+}
+
+function formatTime12HourGas(timeStr) {
+  if (!timeStr) return "";
+  var trimmed = String(timeStr).trim();
+  var parts = trimmed.split(":");
+  if (parts.length >= 2) {
+    var rawH = parseInt(parts[0], 10);
+    var m = parts[1].length === 1 ? "0" + parts[1] : parts[1];
+    if (!isNaN(rawH)) {
+      var ampm = rawH >= 12 ? "PM" : "AM";
+      var h12 = rawH % 12 === 0 ? 12 : rawH % 12;
+      return h12 + ":" + m + " " + ampm;
+    }
+  }
+  return trimmed;
+}
+
+function formatTimeRangeGas(startTime, endTime) {
+  var s = formatTime12HourGas(startTime || "09:00");
+  var e = formatTime12HourGas(endTime || "16:00");
+  if (s && e) {
+    return s + " – " + e;
+  }
+  return s || e || "";
+}
+
+function formatSessionNameGas(sessionName, index) {
+  var dayNum = index + 1;
+  if (!sessionName || typeof sessionName !== "string") {
+    return "Day " + dayNum;
+  }
+  var trimmed = sessionName.trim();
+  if (trimmed.indexOf("วันที่") === 0 || /^วัน(?:ที่)?\s*\d+/i.test(trimmed)) {
+    var match = trimmed.match(/\d+/);
+    var num = match ? match[0] : dayNum;
+    return "Day " + num;
+  }
+  if (/^Day\s*\d+/i.test(trimmed)) {
+    return trimmed;
+  }
+  return "Day " + dayNum + ": " + trimmed;
+}
+
 /**
- * Strips any Thai greetings/prefixes while preserving academic honorifics.
+ * Strips any Thai greetings/prefixes and enforces neutral fallback
+ * if recipient name contains Thai characters or lacks verified English name.
  */
 function cleanEnglishRecipientName(name) {
   if (!name) return "Faculty Member";
-  var cleaned = name.trim();
+  var cleaned = String(name).trim();
+
+  // If contains Thai characters, never use in English greeting
+  if (/[\u0E00-\u0E7F]/.test(cleaned)) {
+    return "Faculty Member";
+  }
 
   // Strip Thai prefixes if present
   if (cleaned.indexOf("เรียน ") === 0) {
@@ -324,16 +422,20 @@ function cleanEnglishRecipientName(name) {
 }
 
 /**
- * Builds fallback plain text body if frontend did not supply emailBody.
+ * Builds fallback plain text body if caller did not supply emailBody.
  */
 function buildFallbackEnglishTextBody(title, recipient, speaker, location, dateStr, startTime, endTime, isMultiDay, scheduleText) {
-  var speakerLine = speaker ? ("Speaker: " + speaker + "\n") : "";
+  var safeRecipient = cleanEnglishRecipientName(recipient);
+  var cleanSpeaker = (speaker && !/[\u0E00-\u0E7F]/.test(speaker)) ? cleanEnglishRecipientName(speaker) : "";
+  var speakerLine = cleanSpeaker ? ("Speaker: " + cleanSpeaker + "\n") : "";
   var scheduleSection = "";
 
   if (isMultiDay && scheduleText) {
     scheduleSection = "Training Schedule:\n" + scheduleText + "\n\n";
   } else {
-    scheduleSection = "Date & Time: " + dateStr + " (" + startTime + " - " + endTime + ")\nVenue: " + location + "\n\n";
+    var fDate = formatDateEnGas(dateStr);
+    var fTime = formatTimeRangeGas(startTime, endTime);
+    scheduleSection = "Date & Time: " + fDate + " (" + fTime + ")\nVenue: " + location + "\n\n";
   }
 
   var calNotice = isMultiDay
@@ -341,7 +443,7 @@ function buildFallbackEnglishTextBody(title, recipient, speaker, location, dateS
     : "A Google Calendar invitation has been attached. Please check your calendar.";
 
   return (
-    "Dear " + recipient + ",\n\n" +
+    "Dear " + safeRecipient + ",\n\n" +
     "You have successfully registered for the workshop \"" + title + "\".\n" +
     speakerLine +
     scheduleSection +
@@ -351,12 +453,13 @@ function buildFallbackEnglishTextBody(title, recipient, speaker, location, dateS
 }
 
 /**
- * Builds fallback HTML body if frontend did not supply emailHtmlBody.
+ * Builds fallback HTML body if caller did not supply emailHtmlBody.
  */
 function buildFallbackEnglishHtmlBody(title, recipient, speaker, location, dateStr, startTime, endTime, isMultiDay, sessions) {
   var safeTitle = escapeHtmlGas(title);
-  var safeRecipient = escapeHtmlGas(recipient);
-  var safeSpeaker = escapeHtmlGas(speaker);
+  var safeRecipient = escapeHtmlGas(cleanEnglishRecipientName(recipient));
+  var cleanSpeaker = (speaker && !/[\u0E00-\u0E7F]/.test(speaker)) ? cleanEnglishRecipientName(speaker) : "";
+  var safeSpeaker = escapeHtmlGas(cleanSpeaker);
   var safeLocation = escapeHtmlGas(location);
 
   var scheduleHtml = "";
@@ -367,15 +470,21 @@ function buildFallbackEnglishHtmlBody(title, recipient, speaker, location, dateS
       '<ul style="margin: 0; padding-left: 20px; color: #334155; font-size: 14px; line-height: 1.8;">';
     for (var i = 0; i < sessions.length; i++) {
       var s = sessions[i];
+      var sName = formatSessionNameGas(s.sessionName, i);
+      var fDate = s.formattedDate || formatDateEnGas(s.date);
+      var fTime = s.formattedTime || formatTimeRangeGas(s.startTime, s.endTime);
+      var venue = s.locationDetail || safeLocation;
       scheduleHtml +=
-        '<li><strong>' + escapeHtmlGas(s.sessionName || ("Day " + (i + 1))) + ':</strong> ' +
-        escapeHtmlGas(s.formattedDate || s.date) + ' (' + escapeHtmlGas(s.formattedTime || (s.startTime + " - " + s.endTime)) + ')<br>' +
-        '<span style="color: #64748b; font-size: 13px;">Venue: ' + escapeHtmlGas(s.locationDetail || safeLocation) + '</span></li>';
+        '<li><strong>' + escapeHtmlGas(sName) + ':</strong> ' +
+        escapeHtmlGas(fDate) + ' (' + escapeHtmlGas(fTime) + ')<br>' +
+        '<span style="color: #64748b; font-size: 13px;">Venue: ' + escapeHtmlGas(venue) + '</span></li>';
     }
     scheduleHtml += '</ul></div>';
   } else {
+    var fDateSingle = formatDateEnGas(dateStr);
+    var fTimeSingle = formatTimeRangeGas(startTime, endTime);
     scheduleHtml =
-      '<p style="margin: 8px 0;"><b>Date &amp; Time:</b> ' + escapeHtmlGas(dateStr) + ' (' + escapeHtmlGas(startTime + ' - ' + endTime) + ')</p>' +
+      '<p style="margin: 8px 0;"><b>Date &amp; Time:</b> ' + escapeHtmlGas(fDateSingle) + ' (' + escapeHtmlGas(fTimeSingle) + ')</p>' +
       '<p style="margin: 8px 0;"><b>Venue:</b> ' + safeLocation + '</p>';
   }
 

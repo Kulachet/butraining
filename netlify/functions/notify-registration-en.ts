@@ -89,35 +89,207 @@ function escapeHtml(str: string | undefined | null): string {
     .replace(/'/g, "&#039;");
 }
 
+const EN_WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
+
+const EN_MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
 /**
- * Formats multi-session schedule for English notifications.
+ * Safely parses date string into year, month, day, and day-of-week
+ * avoiding timezone shift bugs.
  */
-function formatEnglishSchedule(sessions: any[]): { plainText: string; html: string } {
+function parseDatePartsSafe(dateStr: string | undefined | null): {
+  year: number;
+  month: number;
+  day: number;
+  dayOfWeek: number;
+} | null {
+  if (!dateStr || typeof dateStr !== "string") return null;
+  const trimmed = dateStr.trim();
+  const match = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (match) {
+    const year = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
+    const day = parseInt(match[3], 10);
+    // Use noon local time to guarantee immunity from UTC/DST day-shift
+    const d = new Date(year, month - 1, day, 12, 0, 0);
+    return {
+      year,
+      month,
+      day,
+      dayOfWeek: d.getDay(),
+    };
+  }
+  const d = new Date(trimmed);
+  if (isNaN(d.getTime())) return null;
+  return {
+    year: d.getFullYear(),
+    month: d.getMonth() + 1,
+    day: d.getDate(),
+    dayOfWeek: d.getDay(),
+  };
+}
+
+/**
+ * Gregorian English Date Formatter:
+ * 2026-11-12 -> Thursday, November 12, 2026
+ */
+function formatDateEn(dateStr: string | undefined | null): string {
+  if (!dateStr) return "";
+  const parts = parseDatePartsSafe(dateStr);
+  if (!parts) return String(dateStr);
+  const weekday = EN_WEEKDAYS[parts.dayOfWeek] || "";
+  const month = EN_MONTHS[parts.month - 1] || "";
+  return `${weekday}, ${month} ${parts.day}, ${parts.year}`;
+}
+
+/**
+ * 12-hour AM/PM Time Formatter:
+ * "09:00" -> "9:00 AM"
+ * "16:00" -> "4:00 PM"
+ */
+function formatTime12Hour(timeStr: string | undefined | null): string {
+  if (!timeStr) return "";
+  const trimmed = String(timeStr).trim();
+  const parts = trimmed.split(":");
+  if (parts.length >= 2) {
+    const rawH = parseInt(parts[0], 10);
+    const m = parts[1].padStart(2, "0");
+    if (!isNaN(rawH)) {
+      const ampm = rawH >= 12 ? "PM" : "AM";
+      const h12 = rawH % 12 === 0 ? 12 : rawH % 12;
+      return `${h12}:${m} ${ampm}`;
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * English Time Range Formatter with en-dash:
+ * "09:00", "16:00" -> "9:00 AM – 4:00 PM"
+ */
+function formatTimeRangeEn(startTime?: string, endTime?: string): string {
+  const s = formatTime12Hour(startTime || "09:00");
+  const e = formatTime12Hour(endTime || "16:00");
+  if (s && e) {
+    return `${s} – ${e}`;
+  }
+  return s || e || "";
+}
+
+/**
+ * English Session Label Formatter:
+ * Maps generic Thai labels ("วันที่ 1", "วันที่ 2") to "Day 1", "Day 2".
+ * Preserves custom English session titles while maintaining day numbering.
+ */
+function formatSessionNameEn(sessionName: string | undefined | null, index: number): string {
+  const dayNum = index + 1;
+  if (!sessionName || typeof sessionName !== "string") {
+    return `Day ${dayNum}`;
+  }
+  const trimmed = sessionName.trim();
+  // Generic Thai session labels: "วันที่ 1", "วันที่ 2", "วัน 1", etc.
+  if (trimmed.startsWith("วันที่") || /^วัน(?:ที่)?\s*\d+/i.test(trimmed)) {
+    const match = trimmed.match(/\d+/);
+    const num = match ? match[0] : dayNum;
+    return `Day ${num}`;
+  }
+  // Already in English Day format: "Day 1", "Day 2", etc.
+  if (/^Day\s*\d+/i.test(trimmed)) {
+    return trimmed;
+  }
+  // Specific custom title: prepend Day number for clarity
+  return `Day ${dayNum}: ${trimmed}`;
+}
+
+/**
+ * Strips Thai prefixes from English name or speaker name.
+ */
+function cleanEnglishName(name: string | undefined | null): string {
+  if (!name) return "";
+  let cleaned = String(name).trim();
+  // Strip Thai prefixes: เรียน, คุณ, อาจารย์, อ., ดร., ผศ., รศ., ศ.
+  cleaned = cleaned.replace(/^(?:เรียน|คุณ|อาจารย์|อ\.|ดร\.|ผศ\.|รศ\.|ศ\.)\s*/i, "").trim();
+  // Strip "Dear " if erroneously prefixed
+  cleaned = cleaned.replace(/^Dear\s+/i, "").trim();
+  return cleaned;
+}
+
+/**
+ * Strips generic Thai prefixes from speaker name while preserving title.
+ */
+function cleanSpeakerNameEn(name: string | undefined | null): string {
+  if (!name) return "";
+  let s = String(name).trim();
+  s = s.replace(/^(?:อาจารย์|อ\.\s*|คุณ\s*)/i, "").trim();
+  return s;
+}
+
+/**
+ * Formats multi-session schedule for English notifications with
+ * Gregorian dates, 12-hour AM/PM times, and Day N numbering.
+ */
+function formatEnglishSchedule(
+  sessions: any[],
+  defaultLocation: string = "On-site"
+): { plainText: string; html: string } {
   if (!sessions || sessions.length === 0) {
     return { plainText: "", html: "" };
   }
 
   if (sessions.length === 1) {
     const s = sessions[0];
-    const plainText = `Date & Time: ${s.date} (${s.startTime || "09:00"} - ${s.endTime || "16:00"})\nVenue: ${s.locationDetail || "On-site"}`;
-    const html = `<p style="margin: 8px 0;"><b>Date &amp; Time:</b> ${escapeHtml(s.date)} (${escapeHtml(s.startTime || "09:00")} - ${escapeHtml(s.endTime || "16:00")})</p>
-<p style="margin: 8px 0;"><b>Venue:</b> ${escapeHtml(s.locationDetail || "On-site")}</p>`;
+    const formattedDate = formatDateEn(s.date);
+    const formattedTime = formatTimeRangeEn(s.startTime, s.endTime);
+    const venue = s.locationDetail || defaultLocation || "On-site";
+
+    const plainText = `Date & Time: ${formattedDate} (${formattedTime})\nVenue: ${venue}`;
+    const html = `<p style="margin: 8px 0;"><b>Date &amp; Time:</b> ${escapeHtml(formattedDate)} (${escapeHtml(formattedTime)})</p>
+<p style="margin: 8px 0;"><b>Venue:</b> ${escapeHtml(venue)}</p>`;
     return { plainText, html };
   }
 
   const plainText = sessions
-    .map(
-      (s, idx) =>
-        `  • ${s.sessionName || "Day " + (idx + 1)}: ${s.date} (${s.startTime || "09:00"} - ${s.endTime || "16:00"})\n    Venue: ${s.locationDetail || "On-site"}`
-    )
+    .map((s, idx) => {
+      const sName = formatSessionNameEn(s.sessionName, idx);
+      const fDate = formatDateEn(s.date);
+      const fTime = formatTimeRangeEn(s.startTime, s.endTime);
+      const venue = s.locationDetail || defaultLocation || "On-site";
+      return `  • ${sName}: ${fDate} (${fTime})\n    Venue: ${venue}`;
+    })
     .join("\n");
 
   const listItems = sessions
-    .map(
-      (s, idx) =>
-        `<li><strong>${escapeHtml(s.sessionName || "Day " + (idx + 1))}:</strong> ${escapeHtml(s.date)} (${escapeHtml(s.startTime || "09:00")} - ${escapeHtml(s.endTime || "16:00")})<br>` +
-        `<span style="color: #64748b; font-size: 13px;">Venue: ${escapeHtml(s.locationDetail || "On-site")}</span></li>`
-    )
+    .map((s, idx) => {
+      const sName = formatSessionNameEn(s.sessionName, idx);
+      const fDate = formatDateEn(s.date);
+      const fTime = formatTimeRangeEn(s.startTime, s.endTime);
+      const venue = s.locationDetail || defaultLocation || "On-site";
+      return (
+        `<li><strong>${escapeHtml(sName)}:</strong> ${escapeHtml(fDate)} (${escapeHtml(fTime)})<br>` +
+        `<span style="color: #64748b; font-size: 13px;">Venue: ${escapeHtml(venue)}</span></li>`
+      );
+    })
     .join("");
 
   const html = `
@@ -358,9 +530,94 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
       }
     }
 
-    const recipientName = registration.userName || "Faculty Member";
+    // 11. Authoritative English Recipient Name Resolution (Requirement 5)
+    // ONLY resolve from trusted instructor identity record; never trust client registration flags.
+    let verifiedEnglishName: string | null = null;
+    try {
+      let instData: any = null;
+      // 1. Check instructor document by verifiedUid
+      const instDoc = await db.collection("instructors").doc(verifiedUid).get();
+      if (instDoc.exists) {
+        instData = instDoc.data();
+      } else {
+        // 2. Query by verified university email
+        const emailSnap = await db
+          .collection("instructors")
+          .where("email", "==", recipientEmail)
+          .limit(1)
+          .get();
+        if (!emailSnap.empty) {
+          instData = emailSnap.docs[0].data();
+        } else if (registration.instructorId) {
+          // 3. Fallback query by id, confirming email matches
+          const idSnap = await db
+            .collection("instructors")
+            .where("id", "==", registration.instructorId)
+            .limit(1)
+            .get();
+          if (!idSnap.empty && idSnap.docs[0].data().email === recipientEmail) {
+            instData = idSnap.docs[0].data();
+          }
+        }
+      }
+
+      if (instData) {
+        const rawEn = (instData.englishFullName || "").trim();
+        // Strictly require verified status (englishNameVerified === true) and no Thai characters
+        if (rawEn && !/[\u0E00-\u0E7F]/.test(rawEn)) {
+          if (instData.englishNameVerified === true) {
+            verifiedEnglishName = cleanEnglishName(rawEn);
+          }
+        }
+      }
+    } catch (instLookupErr) {
+      console.warn("Authoritative instructor lookup error for English name:", instLookupErr);
+    }
+
+    // Strictly enforce neutral fallback: if verified English name is absent or unverified, use "Faculty Member"
+    // Thai characters, Thai prefixes, or forged client snapshots are NEVER used.
+    const recipientName = verifiedEnglishName || "Faculty Member";
+
+    // 11B. Authoritative Speaker English Name Resolution (Requirement 6)
+    // Do NOT infer or fabricate English speaker names from Thai names.
+    // Use a verified English speaker name only if actually available, otherwise omit the speaker line.
+    let verifiedSpeakerName: string | null = null;
+    const rawSpeaker = (course.instructorName || "").trim();
+
+    if (course.instructorId) {
+      try {
+        let speakerDoc = await db.collection("instructors").doc(course.instructorId).get();
+        let speakerData = speakerDoc.exists ? speakerDoc.data() : null;
+        if (!speakerData) {
+          const speakerSnap = await db
+            .collection("instructors")
+            .where("id", "==", course.instructorId)
+            .limit(1)
+            .get();
+          if (!speakerSnap.empty) {
+            speakerData = speakerSnap.docs[0].data();
+          }
+        }
+        if (speakerData && speakerData.englishFullName && speakerData.englishNameVerified === true) {
+          const sEn = String(speakerData.englishFullName).trim();
+          if (sEn && !/[\u0E00-\u0E7F]/.test(sEn)) {
+            verifiedSpeakerName = cleanEnglishName(sEn);
+          }
+        }
+      } catch (spkErr) {
+        console.warn("Speaker lookup error for English name:", spkErr);
+      }
+    }
+
+    // If not found via instructorId, but course.instructorName is already purely Latin/English
+    if (!verifiedSpeakerName && rawSpeaker) {
+      if (/^[A-Za-z\s.,'-]+$/.test(rawSpeaker)) {
+        verifiedSpeakerName = cleanSpeakerNameEn(rawSpeaker);
+      }
+    }
+
     const courseTitle = course.title || "Academic Workshop";
-    const instructorName = course.instructorName || "";
+
     const rawSessions: any[] = course.sessions || [];
     const isMulti = rawSessions.length > 1;
 
@@ -376,7 +633,16 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
         locationDetail: course.locationDetail || "On-site",
       };
 
-    const schedule = formatEnglishSchedule(rawSessions.length > 0 ? rawSessions : [targetSession]);
+    const effectiveSessions = rawSessions.length > 0 ? rawSessions : [targetSession];
+    const schedule = formatEnglishSchedule(effectiveSessions, course.locationDetail || "On-site");
+
+    const enrichedSessions = effectiveSessions.map((s, idx) => ({
+      ...s,
+      sessionName: formatSessionNameEn(s.sessionName, idx),
+      formattedDate: formatDateEn(s.date),
+      formattedTime: formatTimeRangeEn(s.startTime, s.endTime),
+      locationDetail: s.locationDetail || course.locationDetail || "On-site",
+    }));
 
     // 12. Durable Notification Tracking & Atomic Locking (Phase 2B.1.3A)
     const notifId = `notif_${courseId}_${targetSessionId}_${verifiedUid}`;
@@ -522,7 +788,7 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
     const emailBody =
       `Dear ${recipientName},\n\n` +
       `You have successfully registered for the workshop "${courseTitle}".\n` +
-      (instructorName ? `Speaker: ${instructorName}\n` : "") +
+      (verifiedSpeakerName ? `Speaker: ${verifiedSpeakerName}\n` : "") +
       (isMulti ? `Training Schedule:\n${schedule.plainText}\n\n` : `${schedule.plainText}\n\n`) +
       (isMulti
         ? `A Google Calendar invitation has been attached for the first session. Please add remaining sessions to your personal calendar.\n\n`
@@ -537,7 +803,7 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
       `</div>` +
       `<p style="font-size: 15px; margin-top: 0;">Dear <b>${escapeHtml(recipientName)}</b>,</p>` +
       `<p>You have successfully registered for the workshop: <strong style="color: #0f172a;">&ldquo;${escapeHtml(courseTitle)}&rdquo;</strong></p>` +
-      (instructorName ? `<p style="margin: 8px 0;"><b>Speaker:</b> ${escapeHtml(instructorName)}</p>` : "") +
+      (verifiedSpeakerName ? `<p style="margin: 8px 0;"><b>Speaker:</b> ${escapeHtml(verifiedSpeakerName)}</p>` : "") +
       schedule.html +
       (isMulti
         ? `<p style="color: #475569; margin-top: 18px; font-size: 13px; line-height: 1.5; background-color: #fffbeb; padding: 10px 14px; border-radius: 8px; border-left: 3px solid #f59e0b;">` +
@@ -560,13 +826,13 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
       location: targetSession.locationDetail || course.locationDetail || "On-site",
       guestEmail: recipientEmail,
       recipientName,
-      instructorName,
+      instructorName: verifiedSpeakerName || "",
       date: targetSession.date || course.date,
       startTime: targetSession.startTime || course.startTime || "09:00",
       endTime: targetSession.endTime || course.endTime || "16:00",
       language: "en",
       isMultiDay: isMulti,
-      sessions: rawSessions,
+      sessions: enrichedSessions,
       emailSubject,
       emailBody,
       emailHtmlBody,

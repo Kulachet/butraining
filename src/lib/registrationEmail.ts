@@ -285,18 +285,42 @@ export function buildRegistrationEmailPayload({
   const isEn = courseLang === 'en';
 
   // 2. Instructor display name with academic title preserved
-  const formattedGuestName = formatInstructorName(
-    instructor.name,
-    instructor.id,
-    instructor.position,
-    courseLang
-  );
-  const formattedSpeakerName = formatInstructorName(
+  let formattedGuestName = "";
+  if (isEn) {
+    if (instructor.englishFullName && instructor.englishNameVerified === true && !/[\u0E00-\u0E7F]/.test(instructor.englishFullName)) {
+      formattedGuestName = instructor.englishFullName.trim();
+    } else {
+      const isPureLatin = /^[A-Za-z\s.,'-]+$/.test((instructor.name || "").trim());
+      if (isPureLatin) {
+        formattedGuestName = formatInstructorName(instructor.name, instructor.id, instructor.position, 'en');
+      } else {
+        // Enforce neutral fallback if verified English name is absent
+        formattedGuestName = "Faculty Member";
+      }
+    }
+  } else {
+    formattedGuestName = formatInstructorName(
+      instructor.name,
+      instructor.id,
+      instructor.position,
+      courseLang
+    );
+  }
+
+  const rawSpeaker = formatInstructorName(
     course.instructorName,
     course.instructorId,
     undefined,
     courseLang
   );
+  let formattedSpeakerName = "";
+  if (isEn) {
+    if (rawSpeaker && !/[\u0E00-\u0E7F]/.test(rawSpeaker)) {
+      formattedSpeakerName = rawSpeaker.replace(/^(?:อาจารย์|อ\.\s*|คุณ\s*)/i, "").trim();
+    }
+  } else {
+    formattedSpeakerName = rawSpeaker;
+  }
 
   // 3. Normalized sessions list in chronological order
   const rawSessions = getCourseSessions(course);

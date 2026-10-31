@@ -60,8 +60,23 @@ service cloud.firestore {
 
     match /instructors/{instructorId} {
       allow read: if isAuthenticated();
-      allow create: if (isAdmin() || isOwner(instructorId) || isRequestOwner()) && isValidInstructor(request.resource.data);
-      allow update: if (isAdmin() || isOwner(instructorId) || isDocOwner() || (isAuthenticated() && resource.data.email == request.auth.token.email)) && isValidInstructor(request.resource.data);
+      allow create: if isValidInstructor(request.resource.data) && (
+        isAdmin() || (
+          (isOwner(instructorId) || isRequestOwner()) &&
+          (!('englishNameVerified' in request.resource.data) || request.resource.data.englishNameVerified == false)
+        )
+      );
+      allow update: if isValidInstructor(request.resource.data) && (
+        isAdmin() || (
+          (isOwner(instructorId) || isDocOwner() || (isAuthenticated() && resource.data.email == request.auth.token.email)) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['englishNameVerified']) &&
+          (
+            !('englishNameVerified' in resource.data) ||
+            resource.data.englishNameVerified != true ||
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['englishFullName'])
+          )
+        )
+      );
       allow delete: if isAdmin();
     }
 
@@ -78,7 +93,13 @@ service cloud.firestore {
 
     match /registrations/{regId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && isValidRegistration(request.resource.data);
+      allow create: if isValidRegistration(request.resource.data) && (
+        isAdmin() || (
+          isAuthenticated() && 
+          request.resource.data.userId == request.auth.uid &&
+          (!('userEnglishNameVerified' in request.resource.data) || request.resource.data.userEnglishNameVerified == false)
+        )
+      );
       // แก้ไข: อนุญาตให้ User เจ้าของรายการ สามารถอัปเดต 'attended', 'checkInAt', 'checkInSequenceNumber' และ 'attendedSessions' เพื่อเช็คอินได้
       allow update: if isAdmin() || (
         isAuthenticated() && 

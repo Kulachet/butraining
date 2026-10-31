@@ -53,6 +53,26 @@ export const InstructorProfile: React.FC<InstructorProfileProps> = ({ instructor
             </div>
           </div>
 
+          {instructor.englishFullName && (
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
+                <User className="w-3 h-3" /> {lang === "en" ? "English Name" : "ชื่อ-นามสกุล (ภาษาอังกฤษ)"}
+              </label>
+              <div className="bg-slate-50 px-6 py-4 rounded-2xl border border-slate-100 text-slate-800 font-light tracking-wide flex items-center justify-between">
+                <span>{instructor.englishFullName}</span>
+                {instructor.englishNameVerified === true ? (
+                  <span className="text-[10px] font-semibold text-green-700 bg-green-100 px-2 py-0.5 rounded-md flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3" /> {lang === "en" ? "Verified" : "ยืนยันแล้ว"}
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-md">
+                    {lang === "en" ? "Pending Admin Verification" : "รอการยืนยัน"}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="space-y-2">
             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
               <Mail className="w-3 h-3" /> {t("profileEmail")}
