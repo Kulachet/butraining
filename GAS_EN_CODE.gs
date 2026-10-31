@@ -407,6 +407,10 @@ function cleanEnglishRecipientName(name) {
     return "Faculty Member";
   }
 
+  // Normalize spacing after title abbreviations if compressed: "Dr.Russell" -> "Dr. Russell"
+  cleaned = cleaned.replace(/\b(Dr|Prof|Mr|Ms|Mrs)\.([A-Za-z])/gi, "$1. $2");
+  cleaned = cleaned.replace(/\b(Assoc|Asst)\.\s*Prof\.?([A-Za-z])/gi, "$1. Prof. $2");
+
   // Strip Thai prefixes if present
   if (cleaned.indexOf("เรียน ") === 0) {
     cleaned = cleaned.substring(6).trim();

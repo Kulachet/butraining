@@ -223,26 +223,69 @@ function formatSessionNameEn(sessionName: string | undefined | null, index: numb
 }
 
 /**
- * Strips Thai prefixes from English name or speaker name.
+ * Validates whether a name string is safely written in Latin script,
+ * contains no Thai characters, and is safe from injection.
  */
-function cleanEnglishName(name: string | undefined | null): string {
+function isSafeLatinName(name: string | undefined | null): boolean {
+  if (!name || typeof name !== "string") return false;
+  const trimmed = name.trim();
+  if (trimmed.length < 2 || trimmed.length > 100) return false;
+
+  // Reject if contains any Thai characters (Unicode U+0E00 to U+0E7F)
+  if (/[\u0E00-\u0E7F]/.test(trimmed)) return false;
+
+  // Reject dangerous or suspicious characters (HTML tags, script injection, control characters)
+  if (/[<>{}[\]\\\/;:=_`~$^&*+?|\x00-\x1F\x7F]/.test(trimmed)) return false;
+
+  // Must contain valid Latin characters, accented Latin characters, spaces, hyphens, periods, apostrophes
+  if (!/^[A-Za-z\u00C0-\u024F\s.,'-]+$/.test(trimmed)) return false;
+
+  // Must contain at least one Latin word of 2+ letters
+  if (!/[A-Za-z\u00C0-\u024F]{2,}/.test(trimmed)) return false;
+
+  // Reject placeholder keywords if entire name
+  const lower = trimmed.toLowerCase();
+  const placeholders = ["null", "undefined", "unknown", "n/a", "none", "na", "test", "demo"];
+  if (placeholders.includes(lower)) return false;
+
+  return true;
+}
+
+/**
+ * Normalizes title spacing and trims Latin names:
+ * E.g., "Dr.Russell Tagalog Rodrigo" -> "Dr. Russell Tagalog Rodrigo"
+ * Preserves titles without duplicating or inventing them.
+ */
+function formatLatinName(name: string | undefined | null): string {
   if (!name) return "";
-  let cleaned = String(name).trim();
-  // Strip Thai prefixes: เรียน, คุณ, อาจารย์, อ., ดร., ผศ., รศ., ศ.
-  cleaned = cleaned.replace(/^(?:เรียน|คุณ|อาจารย์|อ\.|ดร\.|ผศ\.|รศ\.|ศ\.)\s*/i, "").trim();
-  // Strip "Dear " if erroneously prefixed
+  let cleaned = String(name).trim().replace(/\s+/g, " ");
+  // Normalize spacing after single-word title abbreviations if compressed: "Dr.Russell" -> "Dr. Russell"
+  cleaned = cleaned.replace(/\b(Dr|Prof|Mr|Ms|Mrs)\.([A-Za-z])/gi, "$1. $2");
+  // Normalize multi-word title abbreviations: "Assoc.Prof.Smith" -> "Assoc. Prof. Smith"
+  cleaned = cleaned.replace(/\b(Assoc|Asst)\.\s*Prof\.?([A-Za-z])/gi, "$1. Prof. $2");
+  // Strip accidental "Dear " prefix if present
   cleaned = cleaned.replace(/^Dear\s+/i, "").trim();
   return cleaned;
 }
 
 /**
- * Strips generic Thai prefixes from speaker name while preserving title.
+ * Compatibility wrapper for cleanEnglishName.
+ */
+function cleanEnglishName(name: string | undefined | null): string {
+  if (!name) return "";
+  let cleaned = String(name).trim();
+  cleaned = cleaned.replace(/^(?:เรียน|คุณ|อาจารย์|อ\.|ดร\.|ผศ\.|รศ\.|ศ\.)\s*/i, "").trim();
+  return formatLatinName(cleaned);
+}
+
+/**
+ * Compatibility wrapper for cleanSpeakerNameEn.
  */
 function cleanSpeakerNameEn(name: string | undefined | null): string {
   if (!name) return "";
   let s = String(name).trim();
   s = s.replace(/^(?:อาจารย์|อ\.\s*|คุณ\s*)/i, "").trim();
-  return s;
+  return formatLatinName(s);
 }
 
 /**
@@ -530,9 +573,14 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
       }
     }
 
-    // 11. Authoritative English Recipient Name Resolution (Requirement 5)
-    // ONLY resolve from trusted instructor identity record; never trust client registration flags.
-    let verifiedEnglishName: string | null = null;
+    // 11. Authoritative English Recipient Name Resolution (Milestone 2B.1.5C)
+    // Order of preference:
+    // A. Approved English Name: instData.englishFullName nonempty AND instData.englishNameVerified === true
+    // B. Unverified Latin Original Name Fallback: instData.name is valid Latin script, no Thai chars, safe name
+    // C. Neutral Fallback: "Faculty Member"
+    let chosenRecipientName: string | null = null;
+    let recipientResolutionSource: "verified_english" | "latin_fallback" | "neutral" = "neutral";
+
     try {
       let instData: any = null;
       // 1. Check instructor document by verifiedUid
@@ -562,11 +610,19 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
       }
 
       if (instData) {
+        // Priority A: Approved English name
         const rawEn = (instData.englishFullName || "").trim();
-        // Strictly require verified status (englishNameVerified === true) and no Thai characters
-        if (rawEn && !/[\u0E00-\u0E7F]/.test(rawEn)) {
-          if (instData.englishNameVerified === true) {
-            verifiedEnglishName = cleanEnglishName(rawEn);
+        if (rawEn && instData.englishNameVerified === true && isSafeLatinName(rawEn)) {
+          chosenRecipientName = formatLatinName(rawEn);
+          recipientResolutionSource = "verified_english";
+        }
+
+        // Priority B: Unverified Latin original name fallback
+        if (!chosenRecipientName) {
+          const rawOrig = (instData.name || "").trim();
+          if (rawOrig && isSafeLatinName(rawOrig)) {
+            chosenRecipientName = formatLatinName(rawOrig);
+            recipientResolutionSource = "latin_fallback";
           }
         }
       }
@@ -574,14 +630,25 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
       console.warn("Authoritative instructor lookup error for English name:", instLookupErr);
     }
 
-    // Strictly enforce neutral fallback: if verified English name is absent or unverified, use "Faculty Member"
-    // Thai characters, Thai prefixes, or forged client snapshots are NEVER used.
-    const recipientName = verifiedEnglishName || "Faculty Member";
+    // Priority C: Strictly enforce neutral fallback if neither verified English nor Latin fallback is available
+    const recipientName = chosenRecipientName || "Faculty Member";
+    if (!chosenRecipientName) {
+      recipientResolutionSource = "neutral";
+    }
 
-    // 11B. Authoritative Speaker English Name Resolution (Requirement 6)
+    console.log(
+      `[NameResolution] Recipient: "${recipientName}", Source: ${recipientResolutionSource}, UID: ${verifiedUid}`
+    );
+
+    // 11B. Authoritative Speaker English Name Resolution (Requirement 6 & 7)
     // Do NOT infer or fabricate English speaker names from Thai names.
-    // Use a verified English speaker name only if actually available, otherwise omit the speaker line.
+    // Order of preference:
+    // A. Approved speaker englishFullName (englishNameVerified === true)
+    // B. Authoritative speaker record original Latin name (speakerData.name)
+    // C. Course instructorName snapshot if already valid Latin script
+    // D. Omit speaker line completely (null)
     let verifiedSpeakerName: string | null = null;
+    let speakerResolutionSource: "verified_english" | "latin_fallback" | "course_snapshot_latin" | "omitted" = "omitted";
     const rawSpeaker = (course.instructorName || "").trim();
 
     if (course.instructorId) {
@@ -598,10 +665,17 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
             speakerData = speakerSnap.docs[0].data();
           }
         }
-        if (speakerData && speakerData.englishFullName && speakerData.englishNameVerified === true) {
-          const sEn = String(speakerData.englishFullName).trim();
-          if (sEn && !/[\u0E00-\u0E7F]/.test(sEn)) {
-            verifiedSpeakerName = cleanEnglishName(sEn);
+        if (speakerData) {
+          const sEn = String(speakerData.englishFullName || "").trim();
+          if (sEn && speakerData.englishNameVerified === true && isSafeLatinName(sEn)) {
+            verifiedSpeakerName = formatLatinName(sEn);
+            speakerResolutionSource = "verified_english";
+          } else if (speakerData.name) {
+            const origSpk = String(speakerData.name).trim();
+            if (isSafeLatinName(origSpk)) {
+              verifiedSpeakerName = formatLatinName(origSpk);
+              speakerResolutionSource = "latin_fallback";
+            }
           }
         }
       } catch (spkErr) {
@@ -609,12 +683,17 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
       }
     }
 
-    // If not found via instructorId, but course.instructorName is already purely Latin/English
+    // Priority C: If not found via instructorId, check course snapshot for safe Latin name
     if (!verifiedSpeakerName && rawSpeaker) {
-      if (/^[A-Za-z\s.,'-]+$/.test(rawSpeaker)) {
-        verifiedSpeakerName = cleanSpeakerNameEn(rawSpeaker);
+      if (isSafeLatinName(rawSpeaker)) {
+        verifiedSpeakerName = formatLatinName(rawSpeaker);
+        speakerResolutionSource = "course_snapshot_latin";
       }
     }
+
+    console.log(
+      `[NameResolution] Speaker: "${verifiedSpeakerName || "(none)"}", Source: ${speakerResolutionSource}, CourseId: ${courseId}`
+    );
 
     const courseTitle = course.title || "Academic Workshop";
 
