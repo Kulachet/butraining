@@ -266,53 +266,123 @@ function handleReminders(data) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-// 4. จัดการส่งลิงก์แบบประเมินผล
+// 4. จัดการส่งลิงก์แบบประเมินผล (รองรับสองภาษา TH/EN และตรวจสอบ Public URL)
 function handleEvaluations(data) {
-  var courseTitle = data.courseTitle || "บทเรียนของคุณ";
-  var evalLink = data.evalLink;
+  function esc(s) {
+    if (!s) return "";
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  }
+
+  function isValidPublishedEvalUrl(rawUrl) {
+    var link = (rawUrl || "").toString().trim();
+    if (!link || link.indexOf("https://") !== 0) return false;
+    var hostMatch = link.match(/^https:\/\/([^\/:?#]+)/i);
+    if (!hostMatch || !hostMatch[1]) return false;
+    var host = hostMatch[1].toLowerCase();
+    if (
+      host.indexOf("ais-pre-") === 0 ||
+      host.indexOf("ais-dev-") === 0 ||
+      host === "run.app" ||
+      host.slice(-8) === ".run.app" ||
+      host === "localhost" ||
+      host === "127.0.0.1"
+    ) {
+      return false;
+    }
+    return link.indexOf("#/evaluate/") !== -1;
+  }
+
+  var lang = (data.language === "en") ? "en" : "th";
+  var isEn = (lang === "en");
+  var courseTitle = data.courseTitle || (isEn ? "Training Workshop" : "หลักสูตรอบรม");
+  var evalLink = String(data.evalLink || data.evaluationUrl || "").trim();
+
+  if (!isValidPublishedEvalUrl(evalLink)) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "error",
+      code: "INVALID_EVALUATION_URL",
+      message: "Rejected evaluation email send: missing or temporary preview evaluation URL."
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
   var recipients = data.recipients || [];
   var sentCount = 0;
+  var safeTitle = esc(courseTitle);
+  var safeLink = esc(evalLink);
+  var senderName = data.senderName || (isEn ? "Learning Development Office" : "สำนักพัฒนาการเรียนรู้");
 
   recipients.forEach(function(recipient) {
     try {
-      if (!recipient.email) return;
+      if (!recipient || !recipient.email) return;
 
-      var subject = "[BU Training] ขอความอนุเคราะห์ทำแบบประเมิน: " + courseTitle;
-      var greetingName = recipient.name || "ผู้เข้าร่วมอบรม";
+      var subject = data.emailSubject || (
+        isEn
+          ? ("[BU Training] Course Evaluation: " + courseTitle)
+          : ("[BU Training] ขอความอนุเคราะห์ทำแบบประเมิน: " + courseTitle)
+      );
+
+      var greetingName = (recipient.name || (isEn ? "Participant" : "ผู้เข้าร่วมอบรม")).trim();
       if (greetingName.indexOf("เรียน ") === 0) {
         greetingName = greetingName.substring(5).trim();
+      } else if (greetingName.indexOf("Dear ") === 0) {
+        greetingName = greetingName.substring(5).trim();
       }
-      
-      var body = "เรียน " + greetingName + ",\n\n" +
-                 "ขอขอบคุณที่ท่านสละเวลาเข้าร่วมการอบรมหลักสูตร \"" + courseTitle + "\"\n" +
-                 "เพื่อให้การจัดการอบรมในครั้งต่อไปดียิ่งขึ้น ทางสำนักพัฒนาการเรียนรู้ (LDO) ใคร่ขอความอนุเคราะห์ท่านสละเวลาทำแบบประเมินผลการอบรมตามลิงก์ด้านล่างนี้ครับ/ค่ะ\n\n" +
-                 evalLink + "\n\n" +
-                 "สำนักพัฒนาการเรียนรู้ (Learning Development Office)\nมหาวิทยาลัยกรุงเทพ";
+      var safeGreeting = esc(greetingName);
 
-      var htmlBody = "<div style='font-family: sans-serif; padding: 20px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;'>" +
-                     "<h3 style='color: #1e3a8a; margin-top: 0;'>เรียน " + greetingName + ",</h3>" +
-                     "<p>ขอขอบคุณที่ท่านสละเวลาเข้าร่วมการอบรมหลักสูตร <b>\"" + courseTitle + "\"</b></p>" +
-                     "<p>เพื่อให้การจัดการอบรมในครั้งต่อไปดียิ่งขึ้น ทางสำนักพัฒนาการเรียนรู้ (LDO) ใคร่ขอความอนุเคราะห์ท่านสละเวลาทำแบบประเมินผลการอบรมตามลิงก์ด้านล่างนี้ครับ/ค่ะ</p>" +
-                     "<div style='margin: 35px 0; text-align: center;'>" +
-                     "<a href='" + evalLink + "' style='background-color: #2563eb; color: white; padding: 16px 32px; text-decoration: none; border-radius: 10px; display: inline-block; font-weight: bold; font-size: 16px; box-shadow: 0 4px 10px rgba(37, 99, 235, 0.25);'>เริ่มทำแบบประเมินผล</a>" +
-                     "</div>" +
-                     "<p style='font-size: 13px; color: #64748b; margin-top: 25px; border-top: 1px solid #f1f5f9; pt: 15px;'>" +
-                     "หากปุ่มด้านบนไม่ทำงาน ท่านสามารถคลิกที่ลิงก์นี้แทน:<br>" +
-                     "<a href='" + evalLink + "' style='color: #3b82f6; word-break: break-all;'>" + evalLink + "</a>" +
-                     "</p>" +
-                     "<p style='margin-top: 30px; font-weight: bold; color: #1e3a8a;'>สำนักพัฒนาการเรียนรู้ (Learning Development Office)<br>มหาวิทยาลัยกรุงเทพ</p>" +
-                     "</div>";
+      var body, htmlBody;
+      if (isEn) {
+        body = "Dear " + greetingName + ",\n\n" +
+               "Thank you for participating in \"" + courseTitle + "\".\n" +
+               "We appreciate your valuable feedback to help improve our future faculty development programs.\n\n" +
+               "Please click the link below to complete the training evaluation.\n" +
+               evalLink + "\n\n" +
+               "Best regards,\nLearning Development Office\nBangkok University";
+
+        htmlBody = "<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 14px; background-color: #ffffff; color: #1e293b;'>" +
+                   "<h3 style='color: #0f172a; margin-top: 0;'>Dear " + safeGreeting + ",</h3>" +
+                   "<p>Thank you for participating in <b>\"" + safeTitle + "\"</b>.</p>" +
+                   "<p>Please click the link below to complete the training evaluation.</p>" +
+                   "<div style='margin: 28px 0; text-align: center;'>" +
+                   "<a href='" + safeLink + "' style='background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; display: inline-block; font-weight: bold; font-size: 15px;'>Complete Course Evaluation</a>" +
+                   "</div>" +
+                   "<p style='font-size: 13px; color: #64748b; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 14px;'>" +
+                   "If the button above does not work, please copy and open this link:<br>" +
+                   "<a href='" + safeLink + "' style='color: #2563eb; word-break: break-all;'>" + safeLink + "</a>" +
+                   "</p>" +
+                   "<p style='margin-top: 24px; font-weight: bold; color: #8b0000;'>Learning Development Office<br><span style='font-weight: normal; color: #64748b; font-size: 13px;'>Bangkok University</span></p>" +
+                   "</div>";
+      } else {
+        body = "เรียน " + greetingName + "\n\n" +
+               "ขอขอบคุณที่ท่านสละเวลาเข้าร่วมการอบรมหลักสูตร \"" + courseTitle + "\"\n" +
+               "เพื่อให้การจัดการอบรมในครั้งต่อไปดียิ่งขึ้น กรุณาคลิกลิงก์ด้านล่างเพื่อประเมินผลการอบรม\n\n" +
+               evalLink + "\n\n" +
+               "สำนักพัฒนาการเรียนรู้ (Learning Development Office)\nมหาวิทยาลัยกรุงเทพ";
+
+        htmlBody = "<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 14px; background-color: #ffffff; color: #1e293b;'>" +
+                   "<h3 style='color: #0f172a; margin-top: 0;'>เรียน " + safeGreeting + ",</h3>" +
+                   "<p>ขอขอบคุณที่ท่านสละเวลาเข้าร่วมการอบรมหลักสูตร <b>\"" + safeTitle + "\"</b></p>" +
+                   "<p>เพื่อให้การจัดการอบรมในครั้งต่อไปดียิ่งขึ้น กรุณาคลิกลิงก์ด้านล่างเพื่อประเมินผลการอบรม</p>" +
+                   "<div style='margin: 28px 0; text-align: center;'>" +
+                   "<a href='" + safeLink + "' style='background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; display: inline-block; font-weight: bold; font-size: 15px;'>เริ่มทำแบบประเมินผล</a>" +
+                   "</div>" +
+                   "<p style='font-size: 13px; color: #64748b; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 14px;'>" +
+                   "หากปุ่มด้านบนไม่ทำงาน ท่านสามารถคลิกที่ลิงก์นี้แทน:<br>" +
+                   "<a href='" + safeLink + "' style='color: #2563eb; word-break: break-all;'>" + safeLink + "</a>" +
+                   "</p>" +
+                   "<p style='margin-top: 24px; font-weight: bold; color: #8b0000;'>สำนักพัฒนาการเรียนรู้ (Learning Development Office)<br><span style='font-weight: normal; color: #64748b; font-size: 13px;'>มหาวิทยาลัยกรุงเทพ</span></p>" +
+                   "</div>";
+      }
 
       MailApp.sendEmail({
         to: recipient.email,
         subject: subject,
         body: body,
         htmlBody: htmlBody,
-        name: "สำนักพัฒนาการเรียนรู้"
+        name: senderName
       });
       sentCount++;
     } catch (e) {
-      Logger.log("Failed to send evaluation to: " + recipient.email + " Error: " + e.toString());
+      Logger.log("Failed to send evaluation to: " + (recipient && recipient.email) + " Error: " + e.toString());
     }
   });
 

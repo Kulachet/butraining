@@ -110,9 +110,47 @@ service cloud.firestore {
       allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
     }
 
+    function expectedEvaluationId(courseId, uid) {
+      return 'eval_' + string(courseId.size()) + '_' + courseId + '_' + uid;
+    }
+
+    function isValidRatingsMap(ratings) {
+      return ratings is map &&
+             ratings.keys().hasOnly(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']) &&
+             ratings.keys().hasAll(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']) &&
+             ratings['0'] is int && ratings['0'] >= 1 && ratings['0'] <= 5 &&
+             ratings['1'] is int && ratings['1'] >= 1 && ratings['1'] <= 5 &&
+             ratings['2'] is int && ratings['2'] >= 1 && ratings['2'] <= 5 &&
+             ratings['3'] is int && ratings['3'] >= 1 && ratings['3'] <= 5 &&
+             ratings['4'] is int && ratings['4'] >= 1 && ratings['4'] <= 5 &&
+             ratings['5'] is int && ratings['5'] >= 1 && ratings['5'] <= 5 &&
+             ratings['6'] is int && ratings['6'] >= 1 && ratings['6'] <= 5 &&
+             ratings['7'] is int && ratings['7'] >= 1 && ratings['7'] <= 5 &&
+             ratings['8'] is int && ratings['8'] >= 1 && ratings['8'] <= 5 &&
+             ratings['9'] is int && ratings['9'] >= 1 && ratings['9'] <= 5;
+    }
+
+    function isValidEvaluation(data) {
+      return data.keys().hasAll(['courseId', 'userId', 'ratings']) &&
+             data.keys().hasOnly(['courseId', 'userId', 'userEmail', 'userName', 'ratings', 'suggestion', 'createdAt']) &&
+             data.courseId is string && data.courseId.size() > 0 && data.courseId.size() <= 128 &&
+             !data.courseId.matches('.*/.*') &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+             !data.userId.matches('.*/.*') &&
+             (!('userEmail' in data) || data.userEmail == null || (data.userEmail is string && data.userEmail.size() <= 254)) &&
+             (!('userName' in data) || (data.userName is string && data.userName.size() <= 256)) &&
+             isValidRatingsMap(data.ratings) &&
+             (!('suggestion' in data) || (data.suggestion is string && data.suggestion.size() <= 5000)) &&
+             (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64));
+    }
+
     match /evaluations/{evaluationId} {
-      allow read: if isAdmin();
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() &&
+                       request.resource.data.userId == request.auth.uid &&
+                       isValidEvaluation(request.resource.data) &&
+                       evaluationId == expectedEvaluationId(request.resource.data.courseId, request.auth.uid) &&
+                       exists(/databases/$(database)/documents/courses/$(request.resource.data.courseId));
       allow update, delete: if isAdmin();
     }
 

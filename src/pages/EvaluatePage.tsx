@@ -1,25 +1,15 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate, Navigate, useLocation } from "react-router-dom";
-import { doc, getDoc, collection, addDoc, query, where, getDocs } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, query, where, getDocs, limit } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { useAuth } from "../components/AuthProvider";
 import { Course } from "../types";
-import { Loader2, ArrowLeft, Send, CheckCircle2 } from "lucide-react";
+import { resolveCourseLang } from "../contexts/LanguageContext";
+import { DEFAULT_QUESTIONS_TH, getEvaluationQuestions, evaluationUi } from "../lib/evaluationI18n";
+import { buildEvaluationDocId } from "../lib/evaluationId";
+import { Loader2, ArrowLeft, Send, CheckCircle2, AlertCircle } from "lucide-react";
 import toast from "react-hot-toast";
 import { motion } from "motion/react";
-
-const DEFAULT_QUESTIONS = [
-  "หัวข้อการอบรมมีความน่าสนใจและทันสมัย",
-  "การอบรมครอบคลุมเนื้อหาได้ครบถ้วน",
-  "เนื้อหาสาระ และกิจกรรมของการอบรม เหมาะสม",
-  "สามารถนำความรู้ที่ได้ ไปประยุกต์ใช้ได้จริง",
-  "วิทยากรมีความรู้ ประสบการณ์ และเชี่ยวชาญในหัวข้อที่อบรม",
-  "วิทยากรถ่ายทอดความรู้ได้ดี และมีกิจกรรมที่เหมาะสมกับหัวข้ออบรม",
-  "วิทยากรเปิดโอกาสให้มีส่วนร่วมและแสดงความคิดเห็นอย่างเพียงพอ",
-  "วิทยากรสามารถตอบคำถามได้อย่างเข้าใจและตรงประเด็น",
-  "ระยะเวลาในการอบรม เหมาะสมและสามารถครอบคลุมกิจกรรมต่างๆ",
-  "ความรู้สึกพึงพอใจโดยรวมต่อการอบรมครั้งนี้"
-];
 
 export const EvaluatePage: React.FC = () => {
   const { courseId } = useParams<{ courseId: string }>();
@@ -33,58 +23,79 @@ export const EvaluatePage: React.FC = () => {
   
   const [course, setCourse] = useState<Course | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [hasEvaluated, setHasEvaluated] = useState(false);
-  const [questions, setQuestions] = useState<string[]>(DEFAULT_QUESTIONS);
+  const [questions, setQuestions] = useState<string[]>(DEFAULT_QUESTIONS_TH);
   
   const [ratings, setRatings] = useState<Record<number, number>>({});
   const [suggestion, setSuggestion] = useState("");
 
-  const displayTitle = course?.title || titleFromUrl || "กำลังโหลดข้อมูล...";
+  const evaluationLang = resolveCourseLang(course);
+  const ui = evaluationUi[evaluationLang];
+  const displayTitle = course?.title || titleFromUrl || ui.loading;
+
+  const hasUserSubmittedEvaluation = useCallback(async (targetCourseId: string, targetUid: string): Promise<boolean> => {
+    // Queries by courseId + userId so both deterministic-ID and legacy random-ID submissions are detected.
+    const existingEvalQ = query(
+      collection(db, "evaluations"),
+      where("courseId", "==", targetCourseId),
+      where("userId", "==", targetUid),
+      limit(1)
+    );
+    const evalSnap = await getDocs(existingEvalQ);
+    return !evalSnap.empty;
+  }, []);
 
   useEffect(() => {
-    const checkStatus = async () => {
-      try {
-        // Fetch questions from settings first
-        const settingsDoc = await getDoc(doc(db, "settings", "evaluation"));
-        if (settingsDoc.exists() && settingsDoc.data().questions) {
-          setQuestions(settingsDoc.data().questions);
-        }
+    if (authLoading) return;
 
+    const checkStatus = async () => {
+      setLoading(true);
+      setLoadError(null);
+      let currentUi: (typeof evaluationUi)["th" | "en"] = evaluationUi.th;
+      try {
         if (!courseId) return;
 
         // Fetch course
         const courseDoc = await getDoc(doc(db, "courses", courseId));
         if (courseDoc.exists()) {
-          setCourse({ id: courseDoc.id, ...courseDoc.data() } as Course);
+          const loadedCourse = { id: courseDoc.id, ...courseDoc.data() } as Course;
+          const resolvedLang = resolveCourseLang(loadedCourse);
+          currentUi = evaluationUi[resolvedLang];
+          setCourse(loadedCourse);
+          const settingsDoc = await getDoc(doc(db, "settings", "evaluation"));
+          setQuestions(getEvaluationQuestions(settingsDoc.exists() ? settingsDoc.data() : undefined, resolvedLang));
         } else {
-          toast.error("ไม่พบข้อมูลหลักสูตร");
+          toast.error(currentUi.missingCourse);
           navigate("/");
           return;
         }
 
         if (!user) return;
 
-        // Check if already evaluated
-        const existingEvalQ = query(
-          collection(db, "evaluations"),
-          where("courseId", "==", courseId),
-          where("userId", "==", user.uid)
-        );
-        const evalSnap = await getDocs(existingEvalQ);
-        if (!evalSnap.empty) {
+        // Check if already evaluated (supports both deterministic and historical random-ID docs)
+        if (await hasUserSubmittedEvaluation(courseId, user.uid)) {
           setHasEvaluated(true);
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error("Error fetching data:", error);
-        toast.error("ข้อผิดพลาดในการโหลดข้อมูล");
+        const code = error?.code || "";
+        const errorMsg =
+          code === "permission-denied"
+            ? currentUi.permissionDenied
+            : code === "unavailable" || (typeof navigator !== "undefined" && !navigator.onLine)
+            ? currentUi.networkError
+            : currentUi.loadError;
+        setLoadError(errorMsg);
+        toast.error(errorMsg);
       } finally {
         setLoading(false);
       }
     };
     
     checkStatus();
-  }, [courseId, user, authLoading, navigate]);
+  }, [courseId, user, authLoading, navigate, hasUserSubmittedEvaluation]);
 
   if (authLoading || loading) {
     return (
@@ -105,9 +116,9 @@ export const EvaluatePage: React.FC = () => {
           <div className="w-20 h-20 bg-crimson/10 rounded-full flex items-center justify-center mx-auto mb-6">
             <Loader2 className="w-10 h-10 text-crimson" />
           </div>
-          <h2 className="text-2xl font-bold text-slate-800 mb-2">กรุณาเข้าสู่ระบบ</h2>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">{ui.loginTitle}</h2>
           <p className="text-slate-500 mb-8 leading-relaxed">
-            ท่านจำเป็นต้องเข้าสู่ระบบด้วยอีเมล @bu.ac.th เพื่อทำแบบประเมินความพึงพอใจของหลักสูตรนี้
+            {ui.loginBody}
           </p>
           <button 
             onClick={login}
@@ -116,7 +127,31 @@ export const EvaluatePage: React.FC = () => {
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
             </svg>
-            เข้าสู่ระบบเพื่อทำแบบประเมิน
+            {ui.loginButton}
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-white max-w-md w-full rounded-3xl p-8 shadow-xl border border-slate-100 text-center"
+        >
+          <div className="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-6">
+            <AlertCircle className="w-10 h-10 text-red-500" />
+          </div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">{ui.errorTitle}</h2>
+          <p className="text-slate-500 mb-8 leading-relaxed">{loadError}</p>
+          <button 
+            onClick={() => navigate("/")}
+            className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-3 rounded-xl transition-colors"
+          >
+            {ui.home}
           </button>
         </motion.div>
       </div>
@@ -134,13 +169,13 @@ export const EvaluatePage: React.FC = () => {
           <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-6">
             <CheckCircle2 className="w-10 h-10 text-green-500" />
           </div>
-          <h2 className="text-2xl font-bold text-slate-800 mb-2">ขอบคุณสำหรับการประเมิน</h2>
-          <p className="text-slate-500 mb-8 leading-relaxed">คุณได้ทำแบบประเมินสำหรับหลักสูตรนี้เรียบร้อยแล้ว ข้อมูลของคุณจะเป็นประโยชน์อย่างยิ่งในการพัฒนาต่อไป</p>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">{ui.thanks}</h2>
+          <p className="text-slate-500 mb-8 leading-relaxed">{ui.already}</p>
           <button 
             onClick={() => navigate("/")}
             className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-3 rounded-xl transition-colors"
           >
-            กลับสู่หน้าหลัก
+            {ui.home}
           </button>
         </motion.div>
       </div>
@@ -153,17 +188,26 @@ export const EvaluatePage: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !courseId) return;
+    if (!user || !courseId || submitting || hasEvaluated) return;
 
     // Validate
     if (Object.keys(ratings).length < questions.length) {
-      toast.error("กรุณาให้คะแนนให้ครบทุกข้อ");
+      toast.error(ui.incomplete);
       return;
     }
 
     setSubmitting(true);
     try {
-      await addDoc(collection(db, "evaluations"), {
+      // Pre-check blocks new submissions if a legacy random-ID or concurrent evaluation already exists
+      if (await hasUserSubmittedEvaluation(courseId, user.uid)) {
+        toast.error(ui.duplicateSubmission);
+        setHasEvaluated(true);
+        return;
+      }
+
+      const deterministicId = buildEvaluationDocId(courseId, user.uid);
+      // Atomic create-only write: if the deterministic document already exists, Firestore evaluates `allow update` and rejects participants.
+      await setDoc(doc(db, "evaluations", deterministicId), {
         courseId,
         userId: user.uid,
         userEmail: user.email,
@@ -172,11 +216,29 @@ export const EvaluatePage: React.FC = () => {
         suggestion,
         createdAt: new Date().toISOString()
       });
-      toast.success("ส่งแบบประเมินเรียบร้อยแล้ว ขอบคุณครับ!");
+      toast.success(ui.success);
       setHasEvaluated(true);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error submitting evaluation:", error);
-      toast.error("เกิดข้อผิดพลาดในการส่งข้อมูล");
+      // Safely recheck user's own submission status before classifying an ambiguous write failure as duplicate
+      try {
+        if (await hasUserSubmittedEvaluation(courseId, user.uid)) {
+          toast.error(ui.duplicateSubmission);
+          setHasEvaluated(true);
+          return;
+        }
+      } catch (recheckError) {
+        console.warn("Unable to recheck submission status after write error:", recheckError);
+      }
+
+      const code = error?.code || "";
+      const errorMsg =
+        code === "permission-denied"
+          ? ui.permissionDenied
+          : code === "unavailable" || (typeof navigator !== "undefined" && !navigator.onLine)
+          ? ui.networkError
+          : ui.submitError;
+      toast.error(errorMsg);
     } finally {
       setSubmitting(false);
     }
@@ -189,23 +251,23 @@ export const EvaluatePage: React.FC = () => {
           onClick={() => navigate("/")}
           className="flex items-center gap-2 text-slate-500 hover:text-crimson transition-colors font-medium text-sm w-fit"
         >
-          <ArrowLeft className="w-4 h-4" /> ย้อนกลับ
+          <ArrowLeft className="w-4 h-4" /> {ui.back}
         </button>
 
         <div>
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">แบบประเมินความพึงพอใจ</h1>
-          <p className="text-slate-500">หลักสูตร: <span className="font-semibold text-crimson">{displayTitle}</span></p>
+          <h1 className="text-3xl font-bold text-slate-800 mb-2">{ui.title}</h1>
+          <p className="text-slate-500">{ui.course} <span className="font-semibold text-crimson">{displayTitle}</span></p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
             <div className="hidden md:grid grid-cols-12 gap-4 p-4 border-b border-slate-100 bg-slate-50/50 text-xs font-bold text-slate-500 uppercase tracking-widest text-center items-center">
-              <div className="col-span-7 text-left pl-2">หัวข้อประเมิน</div>
-              <div className="col-span-1">5<br/><span className="text-[10px] font-normal leading-tight text-slate-400">มากสุด</span></div>
-              <div className="col-span-1">4<br/><span className="text-[10px] font-normal leading-tight text-slate-400">มาก</span></div>
-              <div className="col-span-1">3<br/><span className="text-[10px] font-normal leading-tight text-slate-400">ปานกลาง</span></div>
-              <div className="col-span-1">2<br/><span className="text-[10px] font-normal leading-tight text-slate-400">น้อย</span></div>
-              <div className="col-span-1">1<br/><span className="text-[10px] font-normal leading-tight text-slate-400">น้อยสุด</span></div>
+              <div className="col-span-7 text-left pl-2">{ui.topic}</div>
+              <div className="col-span-1">5<br/><span className="text-[10px] font-normal leading-tight text-slate-400">{ui.scale[0]}</span></div>
+              <div className="col-span-1">4<br/><span className="text-[10px] font-normal leading-tight text-slate-400">{ui.scale[1]}</span></div>
+              <div className="col-span-1">3<br/><span className="text-[10px] font-normal leading-tight text-slate-400">{ui.scale[2]}</span></div>
+              <div className="col-span-1">2<br/><span className="text-[10px] font-normal leading-tight text-slate-400">{ui.scale[3]}</span></div>
+              <div className="col-span-1">1<br/><span className="text-[10px] font-normal leading-tight text-slate-400">{ui.scale[4]}</span></div>
             </div>
             
             <div className="divide-y divide-slate-100">
@@ -243,11 +305,12 @@ export const EvaluatePage: React.FC = () => {
           </div>
 
           <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
-            <label className="block text-sm font-bold text-slate-700 mb-3">{questions.length + 1}. ข้อเสนอแนะเพิ่มเติม</label>
+            <label className="block text-sm font-bold text-slate-700 mb-3">{questions.length + 1}. {ui.suggestion}</label>
             <textarea 
               value={suggestion}
               onChange={(e) => setSuggestion(e.target.value)}
-              placeholder="กรุณากรอกข้อเสนอแนะเพื่อการพัฒนาหลักสูตร..."
+              maxLength={5000}
+              placeholder={ui.suggestionPlaceholder}
               className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 text-sm font-normal text-slate-700 min-h-[120px] focus:ring-2 focus:ring-crimson/20 focus:border-crimson outline-none resize-y transition-all"
             />
           </div>
@@ -259,7 +322,7 @@ export const EvaluatePage: React.FC = () => {
               className="bg-crimson hover:bg-crimson-dark text-white px-10 py-4 rounded-xl font-bold shadow-lg shadow-crimson/20 flex items-center justify-center gap-2 disabled:opacity-50 transition-all text-sm tracking-wide"
             >
               {submitting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-              ส่งแบบประเมินผล
+              {ui.submit}
             </button>
           </div>
         </form>

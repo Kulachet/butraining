@@ -1,170 +1,83 @@
 import React, { useState, useEffect } from "react";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { Loader2, Plus, Trash2, Save, AlertCircle } from "lucide-react";
+import { Loader2, Save, AlertCircle } from "lucide-react";
 import toast from "react-hot-toast";
-import { motion, Reorder } from "motion/react";
-
-const DEFAULT_QUESTIONS = [
-  "หัวข้อการอบรมมีความน่าสนใจและทันสมัย",
-  "การอบรมครอบคลุมเนื้อหาได้ครบถ้วน",
-  "เนื้อหาสาระ และกิจกรรมของการอบรม เหมาะสม",
-  "สามารถนำความรู้ที่ได้ ไปประยุกต์ใช้ได้จริง",
-  "วิทยากรมีความรู้ ประสบการณ์ และเชี่ยวชาญในหัวข้อที่อบรม",
-  "วิทยากรถ่ายทอดความรู้ได้ดี และมีกิจกรรมที่เหมาะสมกับหัวข้ออบรม",
-  "วิทยากรเปิดโอกาสให้มีส่วนร่วมและแสดงความคิดเห็นอย่างเพียงพอ",
-  "วิทยากรสามารถตอบคำถามได้อย่างเข้าใจและตรงประเด็น",
-  "ระยะเวลาในการอบรม เหมาะสมและสามารถครอบคลุมกิจกรรมต่างๆ",
-  "ความรู้สึกพึงพอใจโดยรวมต่อการอบรมครั้งนี้"
-];
+import { DEFAULT_QUESTIONS_TH, DEFAULT_QUESTIONS_EN, EVALUATION_COUNT, getEvaluationQuestions, validQuestions } from "../lib/evaluationI18n";
 
 export const EvaluationSettings: React.FC = () => {
-  const [questions, setQuestions] = useState<string[]>([]);
+  const [questionsTh, setQuestionsTh] = useState<string[]>(DEFAULT_QUESTIONS_TH);
+  const [questionsEn, setQuestionsEn] = useState<string[]>(DEFAULT_QUESTIONS_EN);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
-
   useEffect(() => {
     const fetchSettings = async () => {
       try {
-        const settingsDoc = await getDoc(doc(db, "settings", "evaluation"));
-        if (settingsDoc.exists() && settingsDoc.data().questions) {
-          setQuestions(settingsDoc.data().questions);
-        } else {
-          setQuestions(DEFAULT_QUESTIONS);
+        const snapshot = await getDoc(doc(db, "settings", "evaluation"));
+        const data = snapshot.exists() ? snapshot.data() : undefined;
+        if (data?.questions && !validQuestions(data.questions)) {
+          toast.error("พบชุดคำถามเดิมที่มีจำนวนไม่เท่ากับ 10 ข้อ กรุณาตรวจสอบก่อนแก้ไข");
         }
+        setQuestionsTh(getEvaluationQuestions(data, "th"));
+        setQuestionsEn(getEvaluationQuestions(data, "en"));
       } catch (error) {
-        console.error("Error fetching settings:", error);
+        console.error("Error fetching evaluation settings:", error);
         toast.error("ไม่สามารถโหลดข้อมูลตั้งค่าได้");
-      } finally {
-        setLoading(false);
-      }
+      } finally { setLoading(false); }
     };
     fetchSettings();
   }, []);
-
-  const handleAddQuestion = () => {
-    setQuestions([...questions, ""]);
+  const edit = (index: number, value: string, lang: "th" | "en") => {
+    const setter = lang === "th" ? setQuestionsTh : setQuestionsEn;
+    setter(prev => prev.map((v, i) => i === index ? value : v));
     setHasChanges(true);
   };
-
-  const handleRemoveQuestion = (index: number) => {
-    const newQuestions = questions.filter((_, i) => i !== index);
-    setQuestions(newQuestions);
-    setHasChanges(true);
-  };
-
-  const handleQuestionChange = (index: number, value: string) => {
-    const newQuestions = [...questions];
-    newQuestions[index] = value;
-    setQuestions(newQuestions);
-    setHasChanges(true);
-  };
-
-  const handleSave = async () => {
-    // Filter out empty questions
-    const validQuestions = questions.filter(q => q.trim().length > 0);
-    if (validQuestions.length === 0) {
-      toast.error("กรุณาเพิ่มอย่างน้อย 1 คำถาม");
-      return;
+  const save = async () => {
+    if (!validQuestions(questionsTh) || !validQuestions(questionsEn)) {
+      toast.error("กรุณากรอกคำถามทั้ง 10 ข้อให้ครบทั้งสองภาษา"); return;
     }
-
     setSaving(true);
     try {
+      // Merge preserves other settings fields, while keeping legacy `questions` for existing dashboards.
       await setDoc(doc(db, "settings", "evaluation"), {
-        questions: validQuestions,
+        questions: questionsTh.map(q => q.trim()),
+        questionsEn: questionsEn.map(q => q.trim()),
         updatedAt: new Date().toISOString()
-      });
-      setQuestions(validQuestions);
+      }, { merge: true });
       setHasChanges(false);
-      toast.success("บันทึกการตั้งค่าเรียบร้อยแล้ว");
+      toast.success("บันทึกคำถามทั้งสองภาษาเรียบร้อยแล้ว");
     } catch (error) {
-      console.error("Error saving settings:", error);
+      console.error("Error saving evaluation settings:", error);
       toast.error("ไม่สามารถบันทึกข้อมูลได้");
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-8 h-8 text-crimson animate-spin" />
+  if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 text-crimson animate-spin" /></div>;
+  return <div className="space-y-5">
+    <div className="flex flex-wrap gap-3 items-center justify-between">
+      <div>
+        <h3 className="text-lg font-bold text-slate-800">จัดการคำถามประเมิน (ไทย / English)</h3>
+        <p className="text-sm text-slate-500">คำถาม 10 ข้อจับคู่ตามลำดับเดียวกัน เพื่อรักษาความถูกต้องของรายงานคะแนนเดิม</p>
       </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-lg font-bold text-slate-800">จัดการข้อคำถามการประเมิน</h3>
-          <p className="text-sm text-slate-500">กำหนดรายการคำถามที่จะปรากฏในหน้าประเมินผลความพึงพอใจ</p>
-        </div>
-        <div className="flex gap-3">
-          <button
-            onClick={handleAddQuestion}
-            className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-bold transition-all"
-          >
-            <Plus className="w-4 h-4" /> เพิ่มคำถาม
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || !hasChanges}
-            className="flex items-center gap-2 px-6 py-2 bg-crimson hover:bg-crimson-dark text-white rounded-xl text-sm font-bold shadow-lg shadow-crimson/20 transition-all disabled:opacity-50"
-          >
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            บันทึกการเปลี่ยนแปลง
-          </button>
-        </div>
-      </div>
-
-      {hasChanges && (
-        <div className="bg-amber-50 border border-amber-100 p-4 rounded-2xl flex items-center gap-3 text-amber-800 text-sm">
-          <AlertCircle className="w-5 h-5 flex-shrink-0" />
-          <span>คุณมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก กรุณากดปุ่มบันทึกเพื่อนำไปใช้งานจริง</span>
-        </div>
-      )}
-
-      <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="p-2">
-          <Reorder.Group axis="y" values={questions} onReorder={setQuestions} className="space-y-2">
-            {questions.map((q, index) => (
-              <Reorder.Item
-                key={index}
-                value={q}
-                className="flex items-center gap-4 p-4 bg-white hover:bg-slate-50 rounded-2xl border border-transparent hover:border-slate-100 transition-all group"
-              >
-                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-slate-100 text-[10px] font-bold text-slate-500">
-                  {index + 1}
-                </div>
-                <div className="flex-1">
-                  <input
-                    type="text"
-                    value={q}
-                    onChange={(e) => handleQuestionChange(index, e.target.value)}
-                    placeholder="พิมพ์ข้อคำถามที่นี่..."
-                    className="w-full bg-transparent border-none focus:ring-0 text-sm font-medium text-slate-700 placeholder:text-slate-300"
-                  />
-                </div>
-                <button
-                  onClick={() => handleRemoveQuestion(index)}
-                  className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all md:opacity-0 group-hover:opacity-100"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-                <div className="cursor-grab active:cursor-grabbing p-1 text-slate-300">
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="8" y1="9" x2="16" y2="9"></line>
-                    <line x1="8" y1="15" x2="16" y2="15"></line>
-                    <line x1="12" y1="5" x2="12" y2="19" strokeOpacity="0"></line>
-                  </svg>
-                </div>
-              </Reorder.Item>
-            ))}
-          </Reorder.Group>
-        </div>
-      </div>
+      <button type="button" onClick={save} disabled={saving || !hasChanges}
+        className="flex gap-2 items-center px-5 py-2 rounded-xl bg-crimson text-white font-bold disabled:opacity-50">
+        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} บันทึกทั้งสองภาษา
+      </button>
     </div>
-  );
+    <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-50 text-amber-900 text-sm">
+      <AlertCircle className="w-5 h-5 shrink-0" /> ห้ามเพิ่ม ลบ หรือสลับลำดับคำถาม เนื่องจากรายงานเดิมใช้ตำแหน่งคะแนน 0–9
+    </div>
+    {hasChanges && <div className="text-amber-800 text-sm">มีการแก้ไขที่ยังไม่ได้บันทึก</div>}
+    <div className="space-y-3">
+      {Array.from({ length: EVALUATION_COUNT }, (_, i) => <div key={i} className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+        <div className="font-bold text-slate-600 text-sm">ข้อ {i+1} / Question {i+1}</div>
+        <label className="block text-sm text-slate-700">ภาษาไทย
+          <input aria-label={`คำถามภาษาไทยข้อ ${i+1}`} className="block w-full border border-slate-200 rounded-lg p-3 mt-1" value={questionsTh[i]} onChange={e => edit(i,e.target.value,"th")} />
+        </label>
+        <label className="block text-sm text-slate-700">English
+          <input aria-label={`English question ${i+1}`} className="block w-full border border-slate-200 rounded-lg p-3 mt-1" value={questionsEn[i]} onChange={e => edit(i,e.target.value,"en")} />
+        </label>
+      </div>)}
+    </div>
+  </div>;
 };

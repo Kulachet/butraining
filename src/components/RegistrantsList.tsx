@@ -43,6 +43,13 @@ import { db, auth } from "../lib/firebase";
 import { Course, Registration, SessionAttendance } from "../types";
 import { cn, formatInstructorName, getCourseSessions, isMultiDayCourse, formatDateThai } from "../lib/utils";
 import { RegistrationService } from "../lib/registrationService";
+import {
+  resolveInitialPublicAppUrl,
+  validatePublicAppUrl,
+  buildEvaluationEmailUrl,
+} from "../lib/appUrl";
+import { buildEvaluationEmailPayload } from "../lib/evaluationEmail";
+import { DEFAULT_THAI_GAS_URL } from "../lib/webhookRouter";
 import toast from "react-hot-toast";
 import { QRCodeSVG } from "qrcode.react";
 import Papa from "papaparse";
@@ -84,11 +91,28 @@ export const RegistrantsList: React.FC = () => {
   const [customEvalRecipients, setCustomEvalRecipients] = useState<{id: string, name: string, email: string}[]>([]);
   const [newCustomEvalName, setNewCustomEvalName] = useState("");
   const [newCustomEvalEmail, setNewCustomEvalEmail] = useState("");
-  const [evalBaseUrl, setEvalBaseUrl] = useState<string>(
-    window.location.origin.includes("run.app") 
-      ? "https://..." 
-      : window.location.origin
+  const [isSendingEval, setIsSendingEval] = useState(false);
+  const initialEvalUrlResolution = useMemo(
+    () =>
+      resolveInitialPublicAppUrl(
+        typeof window !== "undefined" ? window.location.origin : undefined
+      ),
+    []
   );
+  const [evalBaseUrl, setEvalBaseUrl] = useState<string>(initialEvalUrlResolution.url);
+  const evalUrlValidation = useMemo(
+    () => validatePublicAppUrl(evalBaseUrl),
+    [evalBaseUrl]
+  );
+  const previewEvalLink = useMemo(() => {
+    if (!selectedCourseId || !evalUrlValidation.valid) return "";
+    const selectedCourse = courses.find((c) => c.id === selectedCourseId);
+    try {
+      return buildEvaluationEmailUrl(evalBaseUrl, selectedCourseId, selectedCourse?.title);
+    } catch {
+      return "";
+    }
+  }, [evalBaseUrl, evalUrlValidation.valid, selectedCourseId, courses]);
   
   // Reminder states
   const [showReminderModal, setShowReminderModal] = useState(false);
@@ -821,12 +845,14 @@ export const RegistrantsList: React.FC = () => {
       toast.error("ไม่มีผู้รับลิงก์ประเมินผลในรายการ");
       return;
     }
-    
+
+    const urlCheck = validatePublicAppUrl(evalBaseUrl);
+    if (!urlCheck.valid || !urlCheck.normalizedBaseUrl) {
+      toast.error(urlCheck.reason || "กรุณากำหนด Published Public URL ที่ถูกต้องก่อนส่งอีเมล", { id: "send_eval" });
+      return;
+    }
+
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
-    // Construct the absolute evaluation URL.
-    const encodedTitle = encodeURIComponent(selectedCourse?.title || "");
-    const safeBaseUrl = evalBaseUrl === "https://..." ? "https://ais-pre-sly2upsojdu5nc47xldytg-166049909817.asia-east1.run.app" : evalBaseUrl;
-    const evalLink = `${safeBaseUrl.replace(/\/$/, "")}${window.location.pathname.replace(/\/$/, "")}/#/evaluate/${selectedCourseId}?title=${encodedTitle}`;
 
     const attendeeRecipients = registrations
       .filter(r => evalSelectedIds.includes(r.id))
@@ -842,20 +868,25 @@ export const RegistrantsList: React.FC = () => {
 
     const recipients = [...attendeeRecipients, ...customRecipients];
 
-    const payload = {
-      action: "send_evaluations",
-      courseTitle: selectedCourse?.title || "หลักสูตรอบรม",
-      evalLink: evalLink,
-      recipients: recipients
-    };
+    let payload;
+    try {
+      payload = buildEvaluationEmailPayload({
+        baseUrl: urlCheck.normalizedBaseUrl,
+        course: selectedCourse || { id: selectedCourseId, title: "หลักสูตรอบรม", language: "th" },
+        recipients,
+      });
+    } catch (validationErr: any) {
+      toast.error(validationErr?.message || "URL ของระบบไม่ถูกต้องสำหรับลิงก์อีเมลประเมินผล", { id: "send_eval" });
+      return;
+    }
 
-    const gasUrl = "https://script.google.com/macros/s/AKfycbyk4505Uis2F-0fKsX7X9iuDsrOfB7aPyD_TO00JUq_BMi9ZDUBzjSKFOFsNHrSVVxN/exec";
+    const gasUrl = (import.meta.env?.VITE_GAS_TH_URL || DEFAULT_THAI_GAS_URL).trim();
 
     try {
+      setIsSendingEval(true);
       toast.loading("กำลังส่งอีเมลลิงก์ประเมินผล...", { id: "send_eval" });
-      console.log("Sending evaluations payload:", payload);
-      
-      const response = await fetch(gasUrl, {
+
+      await fetch(gasUrl, {
         method: "POST",
         mode: "no-cors",
         headers: {
@@ -863,14 +894,15 @@ export const RegistrantsList: React.FC = () => {
         },
         body: JSON.stringify(payload)
       });
-      
-      console.log("GAS Response (Opaque due to no-cors):", response);
-      toast.success(`ส่งลิงก์ประเมินผลสำเร็จ (${recipients.length} คน) กรุณาตรวจสอบอีเมลผู้รับ`, { id: "send_eval" });
+
+      toast.success(`ส่งลิงก์ประเมินผลสำเร็จ (${payload.recipients.length} คน) กรุณาตรวจสอบอีเมลผู้รับ`, { id: "send_eval" });
       setShowEvalModal(false);
-      setCustomEvalRecipients([]); // Clear custom ones after success
+      setCustomEvalRecipients([]);
     } catch (error) {
       console.error("Error sending evaluations:", error);
       toast.error("เกิดข้อผิดพลาดในการส่ง", { id: "send_eval" });
+    } finally {
+      setIsSendingEval(false);
     }
   };
 
@@ -1929,22 +1961,60 @@ export const RegistrantsList: React.FC = () => {
 
             <div className="flex-1 overflow-y-auto pr-2 mb-6 space-y-6">
               
-              <div className="bg-amber-50 p-4 rounded-2xl border border-amber-200">
-                <h4 className="text-sm font-bold text-amber-800 mb-2 flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4" />
-                  URL ของระบบ (สำหรับลิงก์ในอีเมล)
+              <div className={cn(
+                "p-4 rounded-2xl border transition-colors",
+                evalUrlValidation.valid
+                  ? "bg-emerald-50/70 border-emerald-200"
+                  : "bg-red-50/80 border-red-200"
+              )}>
+                <h4 className={cn(
+                  "text-sm font-bold mb-2 flex items-center gap-2",
+                  evalUrlValidation.valid ? "text-emerald-800" : "text-red-800"
+                )}>
+                  {evalUrlValidation.valid ? (
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                  )}
+                  Published Public URL สำหรับลิงก์แบบประเมินในอีเมล
                 </h4>
-                <p className="text-[11px] text-amber-700 mb-3 leading-relaxed">
-                  หากคุณใช้งานระบบผ่าน AI Studio (URL ลับ) ผู้เข้าอบรมที่คลิกลิงก์จะพบข้อความ Error 403 
-                  กรุณากรอก URL สาธารณะของระบบที่ผู้ใช้งานเข้าถึงได้จริง (เช่น Netlify หรือ Firebase URL)
+                <p className={cn(
+                  "text-[11px] mb-3 leading-relaxed",
+                  evalUrlValidation.valid ? "text-emerald-700" : "text-red-700"
+                )}>
+                  ระบบไม่อนุญาตให้ส่ง Preview URL ชั่วคราวของ AI Studio (*.run.app / ais-pre-*) หรือ localhost 
+                  กรุณาตั้งค่า <code className="font-mono font-bold">VITE_PUBLIC_APP_URL</code> หรือกรอก URL สาธารณะที่ใช้งานได้จริง (HTTPS เท่านั้น)
                 </p>
                 <input 
-                  type="text"
-                  placeholder="https://my-app.netlify.app"
+                  type="url"
+                  placeholder="https://your-published-portal.netlify.app"
                   value={evalBaseUrl}
                   onChange={(e) => setEvalBaseUrl(e.target.value)}
-                  className="w-full px-4 py-2 bg-white border border-amber-200 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none transition-all text-sm font-mono text-slate-600"
+                  className={cn(
+                    "w-full px-4 py-2 bg-white border rounded-xl outline-none transition-all text-sm font-mono text-slate-700",
+                    evalUrlValidation.valid
+                      ? "border-emerald-200 focus:ring-2 focus:ring-emerald-500"
+                      : "border-red-300 focus:ring-2 focus:ring-red-500"
+                  )}
                 />
+                {!evalUrlValidation.valid ? (
+                  <p className="mt-2 text-xs font-semibold text-red-700 flex items-start gap-1.5">
+                    <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{evalUrlValidation.reason}</span>
+                  </p>
+                ) : (
+                  previewEvalLink && (
+                    <div className="mt-3 p-2.5 bg-white/90 border border-emerald-200 rounded-xl space-y-1">
+                      <div className="flex items-center justify-between text-[11px] font-bold text-emerald-700">
+                        <span>ตัวอย่างลิงก์ที่จะส่งในอีเมล</span>
+                        <span className="uppercase px-2 py-0.5 bg-emerald-100 rounded-md">
+                          {courses.find(c => c.id === selectedCourseId)?.language === "en" ? "EN Email" : "TH Email"}
+                        </span>
+                      </div>
+                      <p className="text-[11px] font-mono text-slate-600 break-all">{previewEvalLink}</p>
+                    </div>
+                  )
+                )}
               </div>
 
               {/* Add Custom Person Section */}
@@ -2088,16 +2158,17 @@ export const RegistrantsList: React.FC = () => {
             <div className="flex gap-3 pt-4 border-t border-slate-100 mt-auto">
               <button
                 onClick={() => setShowEvalModal(false)}
-                className="flex-1 py-3.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-2xl transition-colors"
+                disabled={isSendingEval}
+                className="flex-1 py-3.5 px-4 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 font-bold rounded-2xl transition-colors"
               >
                 ยกเลิก
               </button>
               <button
                 onClick={handleSendEvaluations}
-                disabled={evalSelectedIds.length === 0 && customEvalRecipients.length === 0}
-                className="flex-[2] py-3.5 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-bold rounded-2xl transition-all shadow-xl shadow-blue-100 flex items-center justify-center gap-2"
+                disabled={isSendingEval || !evalUrlValidation.valid || (evalSelectedIds.length === 0 && customEvalRecipients.length === 0)}
+                className="flex-[2] py-3.5 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 disabled:cursor-not-allowed text-white font-bold rounded-2xl transition-all shadow-xl shadow-blue-100 flex items-center justify-center gap-2"
               >
-                <Send className="w-5 h-5" />
+                {isSendingEval ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                 ยืนยันการส่ง ({evalSelectedIds.length + customEvalRecipients.length} คน)
               </button>
             </div>

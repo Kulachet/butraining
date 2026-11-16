@@ -593,27 +593,82 @@ function handleRemindersEn(data) {
 }
 
 function handleEvaluationsEn(data) {
+  function escHtml(s) {
+    if (!s) return "";
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  }
+
+  function isValidPublishedEvalUrl(rawUrl) {
+    var link = (rawUrl || "").toString().trim();
+    if (!link || link.indexOf("https://") !== 0) return false;
+    var hostMatch = link.match(/^https:\/\/([^\/:?#]+)/i);
+    if (!hostMatch || !hostMatch[1]) return false;
+    var host = hostMatch[1].toLowerCase();
+    if (
+      host.indexOf("ais-pre-") === 0 ||
+      host.indexOf("ais-dev-") === 0 ||
+      host === "run.app" ||
+      host.slice(-8) === ".run.app" ||
+      host === "localhost" ||
+      host === "127.0.0.1"
+    ) {
+      return false;
+    }
+    return link.indexOf("#/evaluate/") !== -1;
+  }
+
   var recipients = data.recipients || [];
   var courseTitle = data.courseTitle || "Workshop";
-  var evalUrl = data.evaluationUrl || "";
+  var evalUrl = String(data.evalLink || data.evaluationUrl || "").trim();
+
+  if (!isValidPublishedEvalUrl(evalUrl)) {
+    return ContentService.createTextOutput(
+      JSON.stringify({
+        status: "error",
+        code: "INVALID_EVALUATION_URL",
+        message: "Rejected English evaluation email send: missing or temporary preview evaluation URL."
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+
   var successCount = 0;
+  var safeTitle = escHtml(courseTitle);
+  var safeUrl = escHtml(evalUrl);
 
   for (var i = 0; i < recipients.length; i++) {
     var r = recipients[i];
     try {
+      if (!r || !r.email) continue;
       var recipientName = cleanEnglishRecipientName(r.name);
-      var subject = "Course Evaluation: " + courseTitle;
+      var safeRecipient = escHtml(recipientName);
+      var subject = data.emailSubject || ("[BU Training] Course Evaluation: " + courseTitle);
       var body = "Dear " + recipientName + ",\n\n" +
-                 "Thank you for participating in \"" + courseTitle + "\".\n\n" +
-                 "We appreciate your valuable feedback to help us enhance future faculty development programs.\n" +
-                 (evalUrl ? ("Please complete the evaluation here: " + evalUrl + "\n\n") : "\n") +
+                 "Thank you for participating in \"" + courseTitle + "\".\n" +
+                 "We appreciate your valuable feedback to help us enhance future faculty development programs.\n\n" +
+                 "Please click the link below to complete the training evaluation.\n" +
+                 evalUrl + "\n\n" +
                  "Best regards,\nLearning Development Office\nBangkok University";
+
+      var htmlBody = "<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 14px; background-color: #ffffff; color: #1e293b;'>" +
+                     "<h3 style='color: #0f172a; margin-top: 0;'>Dear " + safeRecipient + ",</h3>" +
+                     "<p>Thank you for participating in <b>\"" + safeTitle + "\"</b>.</p>" +
+                     "<p>Please click the link below to complete the training evaluation.</p>" +
+                     "<div style='margin: 28px 0; text-align: center;'>" +
+                     "<a href='" + safeUrl + "' style='background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; display: inline-block; font-weight: bold; font-size: 15px;'>Complete Course Evaluation</a>" +
+                     "</div>" +
+                     "<p style='font-size: 13px; color: #64748b; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 14px;'>" +
+                     "If the button above does not work, please copy and open this link:<br>" +
+                     "<a href='" + safeUrl + "' style='color: #2563eb; word-break: break-all;'>" + safeUrl + "</a>" +
+                     "</p>" +
+                     "<p style='margin-top: 24px; font-weight: bold; color: #8b0000;'>Learning Development Office<br><span style='font-weight: normal; color: #64748b; font-size: 13px;'>Bangkok University</span></p>" +
+                     "</div>";
 
       MailApp.sendEmail({
         to: r.email,
         subject: subject,
         body: body,
-        name: "Learning Development Office"
+        htmlBody: htmlBody,
+        name: data.senderName || "Learning Development Office"
       });
       successCount++;
     } catch (err) {
