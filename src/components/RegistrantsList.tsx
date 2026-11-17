@@ -48,7 +48,8 @@ import {
   validatePublicAppUrl,
   buildEvaluationEmailUrl,
 } from "../lib/appUrl";
-import { buildEvaluationEmailPayload } from "../lib/evaluationEmail";
+import { buildEvaluationEmailPayload, resolveEvaluationRecipientName } from "../lib/evaluationEmail";
+import { resolveCourseLang } from "../contexts/LanguageContext";
 import { DEFAULT_THAI_GAS_URL } from "../lib/webhookRouter";
 import toast from "react-hot-toast";
 import { QRCodeSVG } from "qrcode.react";
@@ -122,18 +123,26 @@ export const RegistrantsList: React.FC = () => {
   const [isSendingReminder, setIsSendingReminder] = useState(false);
 
   // Fetch instructors for mapping ID and resolving latest master instructor data
-  const [instructorRecords, setInstructorRecords] = useState<Record<string, { id: string; name: string; position?: string }>>({});
+  const [instructorRecords, setInstructorRecords] = useState<
+    Record<string, { id: string; name: string; position?: string; englishFullName?: string; englishNameVerified?: boolean }>
+  >({});
 
   useEffect(() => {
     const fetchInstructors = async () => {
       try {
         const snap = await getDocs(collection(db, "instructors"));
         const map: Record<string, string> = {};
-        const records: Record<string, { id: string; name: string; position?: string }> = {};
+        const records: Record<string, { id: string; name: string; position?: string; englishFullName?: string; englishNameVerified?: boolean }> = {};
         snap.docs.forEach(doc => {
           const data = doc.data();
           if (data.id) {
-            const instObj = { id: data.id, name: data.name, position: data.position };
+            const instObj = {
+              id: data.id,
+              name: data.name,
+              position: data.position,
+              englishFullName: data.englishFullName,
+              englishNameVerified: data.englishNameVerified,
+            };
             records[data.id] = instObj;
             records[data.id.toLowerCase().trim()] = instObj;
             if (data.email) {
@@ -163,6 +172,33 @@ export const RegistrantsList: React.FC = () => {
     const resolvedPos = matched?.position !== undefined ? matched.position : userPos;
 
     return formatInstructorName(resolvedName, resolvedId, resolvedPos);
+  };
+
+  const formatEvalRecipientName = (
+    language: "th" | "en",
+    userName: string,
+    userEmail?: string,
+    instId?: string,
+    userPos?: string,
+    regEnglishName?: string,
+    regEnglishVerified?: boolean
+  ) => {
+    const emailKey = userEmail ? userEmail.toLowerCase().trim() : "";
+    const idKey = instId ? instId.toLowerCase().trim() : "";
+    const matched = (emailKey && instructorRecords[emailKey]) || (idKey && instructorRecords[idKey]);
+
+    const resolvedId = matched?.id || instId || (userEmail ? (instructorMap[userEmail] || instructorMap[emailKey]) : undefined);
+    const resolvedName = matched?.name || userName;
+    const resolvedPos = matched?.position !== undefined ? matched.position : userPos;
+
+    return resolveEvaluationRecipientName({
+      language,
+      userName: resolvedName,
+      instructorId: resolvedId,
+      userPosition: resolvedPos,
+      englishFullName: matched?.englishFullName ?? regEnglishName,
+      englishNameVerified: matched?.englishNameVerified ?? regEnglishVerified,
+    });
   };
 
   // Fetch all courses for the dropdown
@@ -853,17 +889,26 @@ export const RegistrantsList: React.FC = () => {
     }
 
     const selectedCourse = courses.find(c => c.id === selectedCourseId);
+    const courseLang = resolveCourseLang(selectedCourse);
 
     const attendeeRecipients = registrations
       .filter(r => evalSelectedIds.includes(r.id))
       .map(r => ({
         email: r.userEmail,
-        name: formatRegName(r.userName, r.userEmail, r.instructorId, r.userPosition)
+        name: formatEvalRecipientName(
+          courseLang,
+          r.userName,
+          r.userEmail,
+          r.instructorId,
+          r.userPosition,
+          r.userEnglishName,
+          r.userEnglishNameVerified
+        )
       }));
 
     const customRecipients = customEvalRecipients.map(r => ({
       email: r.email,
-      name: formatRegName(r.name, r.email)
+      name: formatEvalRecipientName(courseLang, r.name, r.email)
     }));
 
     const recipients = [...attendeeRecipients, ...customRecipients];

@@ -158,15 +158,24 @@ export const InstructorService = {
     if (!isIdChanged) {
       // Standard in-place update: document ID remains unchanged
       const targetRef = doc(db, "instructors", oldDocId);
+      const origEnglishName = (originalInstructor.englishFullName || "").trim();
+      const origEnglishVerified = originalInstructor.englishNameVerified === true;
+      const nextEnglishVerified = cleanEnglishName ? Boolean(data.englishNameVerified) : false;
+      const isEnglishFieldsChanged =
+        cleanEnglishName !== origEnglishName || nextEnglishVerified !== origEnglishVerified;
+
       const updateData: Partial<Instructor> = {
         id: oldId,
         name: cleanName,
         email: cleanEmail,
         department: cleanDept,
         position: cleanPosition,
-        ...(cleanEnglishName 
-          ? { englishFullName: cleanEnglishName, englishNameVerified: Boolean(data.englishNameVerified) } 
-          : { englishFullName: "", englishNameVerified: false }),
+        ...(isEnglishFieldsChanged
+          ? {
+              englishFullName: cleanEnglishName,
+              englishNameVerified: nextEnglishVerified,
+            }
+          : {}),
         isManual: true,
         updatedAt: now,
       };

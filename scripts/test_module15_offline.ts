@@ -109,8 +109,9 @@ console.log("\n--- 2. Firestore Rules Static Contract Inspection ---");
   const evalPageText = fs.readFileSync(path.resolve(process.cwd(), "src/pages/EvaluatePage.tsx"), "utf8");
 
   assert(
-    rulesText.includes("allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);"),
-    "Rules restrict evaluation reads to admin or document owner (resource.data.userId == auth.uid)"
+    rulesText.includes("allow get: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();") &&
+      rulesText.includes("allow list: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();"),
+    "Rules restrict evaluation get and list reads to document owner (resource.data.userId == auth.uid) or admin"
   );
   assert(
     rulesText.includes("evaluationId == expectedEvaluationId(request.resource.data.courseId, request.auth.uid)") &&

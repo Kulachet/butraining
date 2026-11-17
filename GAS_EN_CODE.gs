@@ -639,28 +639,45 @@ function handleEvaluationsEn(data) {
     var r = recipients[i];
     try {
       if (!r || !r.email) continue;
-      var recipientName = cleanEnglishRecipientName(r.name);
+      var rawName = (r.name || "").trim();
+      var recipientName = (rawName && !/[\u0E00-\u0E7F]/.test(rawName)) ? cleanEnglishRecipientName(rawName) : "Participant";
+      if (!recipientName || recipientName === "Faculty Member" || /[\u0E00-\u0E7F]/.test(recipientName)) {
+        recipientName = "Participant";
+      }
       var safeRecipient = escHtml(recipientName);
-      var subject = data.emailSubject || ("[BU Training] Course Evaluation: " + courseTitle);
+      var subject = data.emailSubject || ("[BU Training] Training Evaluation Request: " + courseTitle);
       var body = "Dear " + recipientName + ",\n\n" +
-                 "Thank you for participating in \"" + courseTitle + "\".\n" +
-                 "We appreciate your valuable feedback to help us enhance future faculty development programs.\n\n" +
-                 "Please click the link below to complete the training evaluation.\n" +
+                 "Thank you for attending \"" + courseTitle + "\".\n\n" +
+                 "Your feedback is valuable in helping us improve the quality of our future training programs.\n" +
+                 "Please take a few moments to complete the training evaluation by clicking the link below.\n\n" +
+                 "Complete Evaluation:\n" +
                  evalUrl + "\n\n" +
-                 "Best regards,\nLearning Development Office\nBangkok University";
+                 "If the button does not work, please copy and paste the following link into your browser:\n" +
+                 evalUrl + "\n\n" +
+                 "Thank you for your time and valuable feedback.\n\n" +
+                 "Learning Development Office (LDO)\nBangkok University";
 
       var htmlBody = "<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 14px; background-color: #ffffff; color: #1e293b;'>" +
-                     "<h3 style='color: #0f172a; margin-top: 0;'>Dear " + safeRecipient + ",</h3>" +
-                     "<p>Thank you for participating in <b>\"" + safeTitle + "\"</b>.</p>" +
-                     "<p>Please click the link below to complete the training evaluation.</p>" +
+                     "<div style='border-bottom: 2px solid #8b0000; padding-bottom: 12px; margin-bottom: 20px;'>" +
+                     "<span style='font-size: 11px; font-weight: 700; color: #8b0000; text-transform: uppercase; letter-spacing: 1px;'>Bangkok University • Learning Development Office</span>" +
+                     "<h2 style='color: #0f172a; margin: 6px 0 0 0; font-size: 18px;'>Training Evaluation</h2>" +
+                     "</div>" +
+                     "<p style='margin-top: 0;'>Dear <b>" + safeRecipient + "</b>,</p>" +
+                     "<p>Thank you for attending <b>\"" + safeTitle + "\"</b>.</p>" +
+                     "<p>Your feedback is valuable in helping us improve the quality of our future training programs.</p>" +
+                     "<p>Please take a few moments to complete the training evaluation by clicking the link below.</p>" +
                      "<div style='margin: 28px 0; text-align: center;'>" +
-                     "<a href='" + safeUrl + "' style='background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; display: inline-block; font-weight: bold; font-size: 15px;'>Complete Course Evaluation</a>" +
+                     "<a href='" + safeUrl + "' style='background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; display: inline-block; font-weight: bold; font-size: 15px;'>Complete Evaluation</a>" +
                      "</div>" +
                      "<p style='font-size: 13px; color: #64748b; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 14px;'>" +
-                     "If the button above does not work, please copy and open this link:<br>" +
+                     "If the button does not work, please copy and paste the following link into your browser:<br>" +
                      "<a href='" + safeUrl + "' style='color: #2563eb; word-break: break-all;'>" + safeUrl + "</a>" +
                      "</p>" +
-                     "<p style='margin-top: 24px; font-weight: bold; color: #8b0000;'>Learning Development Office<br><span style='font-weight: normal; color: #64748b; font-size: 13px;'>Bangkok University</span></p>" +
+                     "<p style='margin-top: 20px;'>Thank you for your time and valuable feedback.</p>" +
+                     "<div style='margin-top: 16px; padding-top: 14px; border-top: 1px solid #f1f5f9;'>" +
+                     "<p style='margin: 0; font-weight: bold; color: #8b0000;'>Learning Development Office (LDO)</p>" +
+                     "<p style='margin: 2px 0 0 0; font-size: 13px; color: #64748b;'>Bangkok University</p>" +
+                     "</div>" +
                      "</div>";
 
       MailApp.sendEmail({

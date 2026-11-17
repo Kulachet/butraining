@@ -25,14 +25,14 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && (
-        (
-          exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
-          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
-        ) ||
         (request.auth.token.email != null && (
           request.auth.token.email.lower() == "kulachet.l@bu.ac.th" ||
           request.auth.token.email.lower() == "napaporn.pu@bu.ac.th"
-        ))
+        )) ||
+        (
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
+        )
       );
     }
 
@@ -145,7 +145,8 @@ service cloud.firestore {
     }
 
     match /evaluations/{evaluationId} {
-      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow get: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow list: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();
       allow create: if isAuthenticated() &&
                        request.resource.data.userId == request.auth.uid &&
                        isValidEvaluation(request.resource.data) &&

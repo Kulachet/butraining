@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate, Navigate, useLocation } from "react-router-dom";
 import { doc, getDoc, setDoc, collection, query, where, getDocs, limit } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, auth } from "../lib/firebase";
 import { useAuth } from "../components/AuthProvider";
 import { Course } from "../types";
 import { resolveCourseLang } from "../contexts/LanguageContext";
@@ -10,6 +10,27 @@ import { buildEvaluationDocId } from "../lib/evaluationId";
 import { Loader2, ArrowLeft, Send, CheckCircle2, AlertCircle } from "lucide-react";
 import toast from "react-hot-toast";
 import { motion } from "motion/react";
+
+type EvaluationOperation =
+  | "LOAD_COURSE"
+  | "LOAD_EVALUATION_SETTINGS"
+  | "CHECK_EXISTING_EVALUATION"
+  | "SUBMIT_EVALUATION"
+  | "RECHECK_EXISTING_EVALUATION";
+
+function logEvaluationDiagnostic(operation: EvaluationOperation, error: unknown): void {
+  if (!import.meta.env.DEV) return;
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code || "unknown")
+      : "unknown";
+  console.error("[EvaluatePage][DEV]", {
+    operation,
+    code,
+    projectId: db.app.options.projectId || "unknown",
+    authenticated: Boolean(auth.currentUser),
+  });
+}
 
 export const EvaluatePage: React.FC = () => {
   const { courseId } = useParams<{ courseId: string }>();
@@ -35,8 +56,13 @@ export const EvaluatePage: React.FC = () => {
   const ui = evaluationUi[evaluationLang];
   const displayTitle = course?.title || titleFromUrl || ui.loading;
 
-  const hasUserSubmittedEvaluation = useCallback(async (targetCourseId: string, targetUid: string): Promise<boolean> => {
-    // Queries by courseId + userId so both deterministic-ID and legacy random-ID submissions are detected.
+  const hasUserSubmittedEvaluation = useCallback(async (targetCourseId: string): Promise<boolean> => {
+    const currentUser = auth.currentUser;
+    if (!currentUser?.uid) {
+      throw Object.assign(new Error("Firebase Auth user is not initialized."), { code: "auth/not-ready" });
+    }
+    const targetUid = currentUser.uid;
+    // Queries by courseId + auth.currentUser.uid so both deterministic-ID and legacy random-ID submissions are detected.
     const existingEvalQ = query(
       collection(db, "evaluations"),
       where("courseId", "==", targetCourseId),
@@ -54,16 +80,19 @@ export const EvaluatePage: React.FC = () => {
       setLoading(true);
       setLoadError(null);
       let currentUi: (typeof evaluationUi)["th" | "en"] = evaluationUi.th;
+      let currentOperation: EvaluationOperation = "LOAD_COURSE";
       try {
         if (!courseId) return;
 
         // Fetch course
+        currentOperation = "LOAD_COURSE";
         const courseDoc = await getDoc(doc(db, "courses", courseId));
         if (courseDoc.exists()) {
           const loadedCourse = { id: courseDoc.id, ...courseDoc.data() } as Course;
           const resolvedLang = resolveCourseLang(loadedCourse);
           currentUi = evaluationUi[resolvedLang];
           setCourse(loadedCourse);
+          currentOperation = "LOAD_EVALUATION_SETTINGS";
           const settingsDoc = await getDoc(doc(db, "settings", "evaluation"));
           setQuestions(getEvaluationQuestions(settingsDoc.exists() ? settingsDoc.data() : undefined, resolvedLang));
         } else {
@@ -72,14 +101,15 @@ export const EvaluatePage: React.FC = () => {
           return;
         }
 
-        if (!user) return;
+        if (!user || !auth.currentUser) return;
 
         // Check if already evaluated (supports both deterministic and historical random-ID docs)
-        if (await hasUserSubmittedEvaluation(courseId, user.uid)) {
+        currentOperation = "CHECK_EXISTING_EVALUATION";
+        if (await hasUserSubmittedEvaluation(courseId)) {
           setHasEvaluated(true);
         }
       } catch (error: any) {
-        console.error("Error fetching data:", error);
+        logEvaluationDiagnostic(currentOperation, error);
         const code = error?.code || "";
         const errorMsg =
           code === "permission-denied"
@@ -188,7 +218,8 @@ export const EvaluatePage: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !courseId || submitting || hasEvaluated) return;
+    const currentUser = auth.currentUser;
+    if (!user || !currentUser || !courseId || submitting || hasEvaluated) return;
 
     // Validate
     if (Object.keys(ratings).length < questions.length) {
@@ -197,21 +228,24 @@ export const EvaluatePage: React.FC = () => {
     }
 
     setSubmitting(true);
+    let currentOperation: EvaluationOperation = "CHECK_EXISTING_EVALUATION";
     try {
       // Pre-check blocks new submissions if a legacy random-ID or concurrent evaluation already exists
-      if (await hasUserSubmittedEvaluation(courseId, user.uid)) {
+      if (await hasUserSubmittedEvaluation(courseId)) {
         toast.error(ui.duplicateSubmission);
         setHasEvaluated(true);
         return;
       }
 
-      const deterministicId = buildEvaluationDocId(courseId, user.uid);
+      currentOperation = "SUBMIT_EVALUATION";
+      const activeUid = currentUser.uid;
+      const deterministicId = buildEvaluationDocId(courseId, activeUid);
       // Atomic create-only write: if the deterministic document already exists, Firestore evaluates `allow update` and rejects participants.
       await setDoc(doc(db, "evaluations", deterministicId), {
         courseId,
-        userId: user.uid,
-        userEmail: user.email,
-        userName: user.displayName || "Unknown",
+        userId: activeUid,
+        userEmail: currentUser.email ?? user.email,
+        userName: currentUser.displayName || user.displayName || "Unknown",
         ratings,
         suggestion,
         createdAt: new Date().toISOString()
@@ -219,16 +253,16 @@ export const EvaluatePage: React.FC = () => {
       toast.success(ui.success);
       setHasEvaluated(true);
     } catch (error: any) {
-      console.error("Error submitting evaluation:", error);
+      logEvaluationDiagnostic(currentOperation, error);
       // Safely recheck user's own submission status before classifying an ambiguous write failure as duplicate
       try {
-        if (await hasUserSubmittedEvaluation(courseId, user.uid)) {
+        if (await hasUserSubmittedEvaluation(courseId)) {
           toast.error(ui.duplicateSubmission);
           setHasEvaluated(true);
           return;
         }
       } catch (recheckError) {
-        console.warn("Unable to recheck submission status after write error:", recheckError);
+        logEvaluationDiagnostic("RECHECK_EXISTING_EVALUATION", recheckError);
       }
 
       const code = error?.code || "";

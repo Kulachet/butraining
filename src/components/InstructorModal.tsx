@@ -54,16 +54,30 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
 
   const [submitting, setSubmitting] = useState(false);
 
-  // Extract unique departments for datalist autocomplete
+  const [isCustomDepartment, setIsCustomDepartment] = useState(false);
+
+  // Extract unique departments from existing instructors (preserves existing option source)
   const existingDepartments = useMemo(() => {
     const depts = new Set<string>();
     allInstructors.forEach((inst) => {
-      if (inst.department && inst.department.trim()) {
-        depts.add(inst.department.trim());
+      const trimmed = inst.department?.trim();
+      if (trimmed) {
+        depts.add(trimmed);
       }
     });
-    return Array.from(depts).sort();
+    return Array.from(depts).sort((a, b) => a.localeCompare(b, "th"));
   }, [allInstructors]);
+
+  // Ensure the currently saved department is present without duplicates so legacy values are never silently overwritten
+  const departmentOptions = useMemo(() => {
+    const options = [...existingDepartments];
+    const rawSaved = instructorToEdit?.department || "";
+    const trimmedSaved = rawSaved.trim();
+    if (trimmedSaved && !options.includes(trimmedSaved)) {
+      options.unshift(rawSaved);
+    }
+    return options;
+  }, [existingDepartments, instructorToEdit]);
 
   // Extract common academic positions for suggestions
   const commonPositions = [
@@ -78,15 +92,19 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       if (instructorToEdit) {
+        const rawDept = instructorToEdit.department || "";
+        const trimmedDept = rawDept.trim();
+        const resolvedDept = existingDepartments.includes(trimmedDept) ? trimmedDept : rawDept;
         setFormData({
           id: instructorToEdit.id || "",
           name: instructorToEdit.name || "",
           email: instructorToEdit.email || "",
-          department: instructorToEdit.department || "",
+          department: resolvedDept,
           position: instructorToEdit.position || "",
           englishFullName: instructorToEdit.englishFullName || "",
           englishNameVerified: instructorToEdit.englishNameVerified === true,
         });
+        setIsCustomDepartment(false);
       } else {
         setFormData({
           id: "",
@@ -97,10 +115,12 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
           englishFullName: "",
           englishNameVerified: false,
         });
+        setIsCustomDepartment(existingDepartments.length === 0);
       }
       setErrors({});
       setSubmitting(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, instructorToEdit]);
 
   const isIdModified = useMemo(() => {
@@ -110,8 +130,11 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
 
   const handleChange = (field: keyof InstructorFormData, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
-    // Clear field-specific error as user types
-    if (errors[field]) {
+    // Clear field-specific error as user types/selects
+    if (
+      (field === "id" || field === "name" || field === "email" || field === "department") &&
+      errors[field]
+    ) {
       setErrors((prev) => ({ ...prev, [field]: undefined }));
     }
   };
@@ -146,7 +169,10 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
       onClose();
     } catch (err: any) {
       console.error("Save instructor error:", err);
-      const msg = err?.message || "เกิดข้อผิดพลาดในการบันทึกข้อมูล";
+      const msg =
+        err?.code === "permission-denied"
+          ? "คุณไม่มีสิทธิ์บันทึกการแก้ไขข้อมูลอาจารย์ กรุณาตรวจสอบสิทธิ์ผู้ดูแลระบบ"
+          : err?.message || "เกิดข้อผิดพลาดในการบันทึกข้อมูล";
       setErrors({ general: msg });
       toast.error(msg);
     } finally {
@@ -359,28 +385,76 @@ export const InstructorModal: React.FC<InstructorModalProps> = ({
               {/* Row 4: Department & Academic Position */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="text-xs sm:text-sm font-semibold text-slate-700 flex items-center gap-2">
-                    <Building2 className="w-4 h-4 text-slate-400" />
-                    คณะ / หน่วยงาน <span className="text-crimson">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    list="departments-list"
-                    value={formData.department}
-                    onChange={(e) => handleChange("department", e.target.value)}
-                    placeholder="เช่น คณะเทคโนโลยีสารสนเทศ"
-                    className={`w-full px-4 py-3 bg-slate-50 border rounded-2xl text-[14px] sm:text-[15px] text-[#333333] font-medium outline-none transition-all ${
-                      errors.department 
-                        ? "border-red-300 focus:ring-2 focus:ring-red-400 bg-red-50/20" 
-                        : "border-slate-200 focus:border-crimson focus:ring-2 focus:ring-crimson/10"
-                    }`}
-                    disabled={submitting}
-                  />
-                  <datalist id="departments-list">
-                    {existingDepartments.map((dept) => (
-                      <option key={dept} value={dept} />
-                    ))}
-                  </datalist>
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="instructor-department-field"
+                      className="text-xs sm:text-sm font-semibold text-slate-700 flex items-center gap-2"
+                    >
+                      <Building2 className="w-4 h-4 text-slate-400" />
+                      คณะ / หน่วยงาน <span className="text-crimson">*</span>
+                    </label>
+                    {isCustomDepartment && departmentOptions.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCustomDepartment(false);
+                          const rawDept = instructorToEdit?.department || "";
+                          const trimmedDept = rawDept.trim();
+                          handleChange(
+                            "department",
+                            existingDepartments.includes(trimmedDept) ? trimmedDept : rawDept
+                          );
+                        }}
+                        disabled={submitting}
+                        className="text-[11px] font-medium text-crimson hover:underline disabled:opacity-50"
+                      >
+                        เลือกจากรายการ
+                      </button>
+                    )}
+                  </div>
+                  {isCustomDepartment ? (
+                    <input
+                      id="instructor-department-field"
+                      type="text"
+                      value={formData.department}
+                      onChange={(e) => handleChange("department", e.target.value)}
+                      placeholder="เช่น คณะเทคโนโลยีสารสนเทศ"
+                      className={`w-full px-4 py-3 bg-slate-50 border rounded-2xl text-[14px] sm:text-[15px] text-[#333333] font-medium outline-none transition-all ${
+                        errors.department
+                          ? "border-red-300 focus:ring-2 focus:ring-red-400 bg-red-50/20"
+                          : "border-slate-200 focus:border-crimson focus:ring-2 focus:ring-crimson/10"
+                      }`}
+                      disabled={submitting}
+                    />
+                  ) : (
+                    <select
+                      id="instructor-department-field"
+                      value={formData.department}
+                      onChange={(e) => {
+                        const selected = e.target.value;
+                        if (selected === "__CUSTOM_DEPARTMENT__") {
+                          setIsCustomDepartment(true);
+                          handleChange("department", "");
+                        } else {
+                          handleChange("department", selected);
+                        }
+                      }}
+                      className={`w-full px-4 py-3 bg-slate-50 border rounded-2xl text-[14px] sm:text-[15px] text-[#333333] font-medium outline-none transition-all ${
+                        errors.department
+                          ? "border-red-300 focus:ring-2 focus:ring-red-400 bg-red-50/20"
+                          : "border-slate-200 focus:border-crimson focus:ring-2 focus:ring-crimson/10"
+                      }`}
+                      disabled={submitting}
+                    >
+                      <option value="">-- เลือกคณะ / หน่วยงาน --</option>
+                      {departmentOptions.map((dept) => (
+                        <option key={dept} value={dept}>
+                          {dept}
+                        </option>
+                      ))}
+                      <option value="__CUSTOM_DEPARTMENT__">+ กรอกคณะ / หน่วยงานใหม่...</option>
+                    </select>
+                  )}
                   {errors.department && (
                     <p className="text-xs text-red-500 font-medium pl-1">{errors.department}</p>
                   )}

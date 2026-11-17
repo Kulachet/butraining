@@ -317,7 +317,7 @@ function handleEvaluations(data) {
 
       var subject = data.emailSubject || (
         isEn
-          ? ("[BU Training] Course Evaluation: " + courseTitle)
+          ? ("[BU Training] Training Evaluation Request: " + courseTitle)
           : ("[BU Training] ขอความอนุเคราะห์ทำแบบประเมิน: " + courseTitle)
       );
 
@@ -327,29 +327,45 @@ function handleEvaluations(data) {
       } else if (greetingName.indexOf("Dear ") === 0) {
         greetingName = greetingName.substring(5).trim();
       }
+      if (isEn && (!greetingName || /[\u0E00-\u0E7F]/.test(greetingName))) {
+        greetingName = "Participant";
+      }
       var safeGreeting = esc(greetingName);
 
       var body, htmlBody;
       if (isEn) {
         body = "Dear " + greetingName + ",\n\n" +
-               "Thank you for participating in \"" + courseTitle + "\".\n" +
-               "We appreciate your valuable feedback to help improve our future faculty development programs.\n\n" +
-               "Please click the link below to complete the training evaluation.\n" +
+               "Thank you for attending \"" + courseTitle + "\".\n\n" +
+               "Your feedback is valuable in helping us improve the quality of our future training programs.\n" +
+               "Please take a few moments to complete the training evaluation by clicking the link below.\n\n" +
+               "Complete Evaluation:\n" +
                evalLink + "\n\n" +
-               "Best regards,\nLearning Development Office\nBangkok University";
+               "If the button does not work, please copy and paste the following link into your browser:\n" +
+               evalLink + "\n\n" +
+               "Thank you for your time and valuable feedback.\n\n" +
+               "Learning Development Office (LDO)\nBangkok University";
 
         htmlBody = "<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 14px; background-color: #ffffff; color: #1e293b;'>" +
-                   "<h3 style='color: #0f172a; margin-top: 0;'>Dear " + safeGreeting + ",</h3>" +
-                   "<p>Thank you for participating in <b>\"" + safeTitle + "\"</b>.</p>" +
-                   "<p>Please click the link below to complete the training evaluation.</p>" +
+                   "<div style='border-bottom: 2px solid #8b0000; padding-bottom: 12px; margin-bottom: 20px;'>" +
+                   "<span style='font-size: 11px; font-weight: 700; color: #8b0000; text-transform: uppercase; letter-spacing: 1px;'>Bangkok University • Learning Development Office</span>" +
+                   "<h2 style='color: #0f172a; margin: 6px 0 0 0; font-size: 18px;'>Training Evaluation</h2>" +
+                   "</div>" +
+                   "<p style='margin-top: 0;'>Dear <b>" + safeGreeting + "</b>,</p>" +
+                   "<p>Thank you for attending <b>\"" + safeTitle + "\"</b>.</p>" +
+                   "<p>Your feedback is valuable in helping us improve the quality of our future training programs.</p>" +
+                   "<p>Please take a few moments to complete the training evaluation by clicking the link below.</p>" +
                    "<div style='margin: 28px 0; text-align: center;'>" +
-                   "<a href='" + safeLink + "' style='background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; display: inline-block; font-weight: bold; font-size: 15px;'>Complete Course Evaluation</a>" +
+                   "<a href='" + safeLink + "' style='background-color: #2563eb; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; display: inline-block; font-weight: bold; font-size: 15px;'>Complete Evaluation</a>" +
                    "</div>" +
                    "<p style='font-size: 13px; color: #64748b; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 14px;'>" +
-                   "If the button above does not work, please copy and open this link:<br>" +
+                   "If the button does not work, please copy and paste the following link into your browser:<br>" +
                    "<a href='" + safeLink + "' style='color: #2563eb; word-break: break-all;'>" + safeLink + "</a>" +
                    "</p>" +
-                   "<p style='margin-top: 24px; font-weight: bold; color: #8b0000;'>Learning Development Office<br><span style='font-weight: normal; color: #64748b; font-size: 13px;'>Bangkok University</span></p>" +
+                   "<p style='margin-top: 20px;'>Thank you for your time and valuable feedback.</p>" +
+                   "<div style='margin-top: 16px; padding-top: 14px; border-top: 1px solid #f1f5f9;'>" +
+                   "<p style='margin: 0; font-weight: bold; color: #8b0000;'>Learning Development Office (LDO)</p>" +
+                   "<p style='margin: 2px 0 0 0; font-size: 13px; color: #64748b;'>Bangkok University</p>" +
+                   "</div>" +
                    "</div>";
       } else {
         body = "เรียน " + greetingName + "\n\n" +
@@ -359,7 +375,11 @@ function handleEvaluations(data) {
                "สำนักพัฒนาการเรียนรู้ (Learning Development Office)\nมหาวิทยาลัยกรุงเทพ";
 
         htmlBody = "<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; line-height: 1.6; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 14px; background-color: #ffffff; color: #1e293b;'>" +
-                   "<h3 style='color: #0f172a; margin-top: 0;'>เรียน " + safeGreeting + ",</h3>" +
+                   "<div style='border-bottom: 2px solid #8b0000; padding-bottom: 12px; margin-bottom: 20px;'>" +
+                   "<span style='font-size: 11px; font-weight: 700; color: #8b0000; text-transform: uppercase; letter-spacing: 1px;'>มหาวิทยาลัยกรุงเทพ • สำนักพัฒนาการเรียนรู้</span>" +
+                   "<h2 style='color: #0f172a; margin: 6px 0 0 0; font-size: 18px;'>แบบประเมินความพึงพอใจการอบรม</h2>" +
+                   "</div>" +
+                   "<p style='margin-top: 0;'>เรียน <b>" + safeGreeting + "</b>,</p>" +
                    "<p>ขอขอบคุณที่ท่านสละเวลาเข้าร่วมการอบรมหลักสูตร <b>\"" + safeTitle + "\"</b></p>" +
                    "<p>เพื่อให้การจัดการอบรมในครั้งต่อไปดียิ่งขึ้น กรุณาคลิกลิงก์ด้านล่างเพื่อประเมินผลการอบรม</p>" +
                    "<div style='margin: 28px 0; text-align: center;'>" +
@@ -369,7 +389,10 @@ function handleEvaluations(data) {
                    "หากปุ่มด้านบนไม่ทำงาน ท่านสามารถคลิกที่ลิงก์นี้แทน:<br>" +
                    "<a href='" + safeLink + "' style='color: #2563eb; word-break: break-all;'>" + safeLink + "</a>" +
                    "</p>" +
-                   "<p style='margin-top: 24px; font-weight: bold; color: #8b0000;'>สำนักพัฒนาการเรียนรู้ (Learning Development Office)<br><span style='font-weight: normal; color: #64748b; font-size: 13px;'>มหาวิทยาลัยกรุงเทพ</span></p>" +
+                   "<div style='margin-top: 24px; padding-top: 14px; border-top: 1px solid #f1f5f9;'>" +
+                   "<p style='margin: 0; font-weight: bold; color: #8b0000;'>สำนักพัฒนาการเรียนรู้ (Learning Development Office)</p>" +
+                   "<p style='margin: 2px 0 0 0; font-size: 13px; color: #64748b;'>มหาวิทยาลัยกรุงเทพ</p>" +
+                   "</div>" +
                    "</div>";
       }
 
