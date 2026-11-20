@@ -45,13 +45,29 @@ service cloud.firestore {
              (!('uid' in data) || (data.uid is string && data.uid.size() > 0));
     }
 
-    function isValidRegistration(data) {
-      return data.keys().hasAll(['courseId', 'userId', 'userName', 'userEmail', 'sequenceNumber']) &&
-             data.courseId is string &&
-             data.userId is string &&
-             data.userName is string &&
-             data.userEmail is string &&
+    function isValidOnlineRegistration(data) {
+      return (!('source' in data) || data.source == 'online') &&
+             data.keys().hasAll(['courseId', 'userId', 'userName', 'userEmail', 'sequenceNumber']) &&
+             data.courseId is string && data.courseId.size() > 0 && data.courseId.size() <= 128 &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+             data.userName is string && data.userName.size() > 0 && data.userName.size() <= 256 &&
+             data.userEmail is string && data.userEmail.size() > 0 && data.userEmail.size() <= 254 &&
              data.sequenceNumber is number;
+    }
+
+    function isValidWalkInRegistration(data) {
+      return data.keys().hasAll(['courseId', 'source', 'userName', 'userEmail', 'sequenceNumber', 'attended', 'createdByAdminUid']) &&
+             data.source == 'walk_in' &&
+             data.courseId is string && data.courseId.size() > 0 && data.courseId.size() <= 128 &&
+             (!('userId' in data) || data.userId == null) &&
+             data.userName is string && data.userName.size() > 0 && data.userName.size() <= 256 &&
+             data.userEmail is string && data.userEmail.matches("^[a-zA-Z0-9._%+-]+@bu\\.ac\\.th$") &&
+             (!('instructorId' in data) || (data.instructorId is string && data.instructorId.size() <= 64)) &&
+             (!('userDepartment' in data) || (data.userDepartment is string && data.userDepartment.size() <= 256)) &&
+             (!('userPosition' in data) || (data.userPosition is string && data.userPosition.size() <= 256)) &&
+             data.sequenceNumber is number &&
+             data.attended is bool &&
+             data.createdByAdminUid is string && data.createdByAdminUid.size() > 0 && data.createdByAdminUid.size() <= 128;
     }
 
     // ===============================================================
@@ -93,65 +109,56 @@ service cloud.firestore {
 
     match /registrations/{regId} {
       allow read: if isAuthenticated();
-      allow create: if isValidRegistration(request.resource.data) && (
-        isAdmin() || (
-          isAuthenticated() && 
-          request.resource.data.userId == request.auth.uid &&
-          (!('userEnglishNameVerified' in request.resource.data) || request.resource.data.userEnglishNameVerified == false)
+      allow create: if (
+        isAdmin() && (
+          isValidOnlineRegistration(request.resource.data) ||
+          (
+            isValidWalkInRegistration(request.resource.data) &&
+            request.resource.data.createdByAdminUid == request.auth.uid &&
+            exists(/databases/$(database)/documents/courses/$(request.resource.data.courseId))
+          )
         )
+      ) || (
+        isAuthenticated() &&
+        isValidOnlineRegistration(request.resource.data) &&
+        request.resource.data.userId == request.auth.uid &&
+        (!('userEnglishNameVerified' in request.resource.data) || request.resource.data.userEnglishNameVerified == false)
       );
-      // แก้ไข: อนุญาตให้ User เจ้าของรายการ สามารถอัปเดต 'attended', 'checkInAt', 'checkInSequenceNumber' และ 'attendedSessions' เพื่อเช็คอินได้
-      allow update: if isAdmin() || (
-        isAuthenticated() && 
-        resource.data.userId == request.auth.uid && 
+      // อนุญาตให้ Admin จัดการได้ทั้ง online และ walk_in; User เจ้าของรายการ online อัปเดตเฉพาะสถานะเช็คอินของตนเองได้เท่านั้น
+      allow update: if (
+        isAdmin() && (
+          isValidOnlineRegistration(request.resource.data) ||
+          (
+            isValidWalkInRegistration(request.resource.data) &&
+            resource.data.source == 'walk_in' &&
+            (!('createdByAdminUid' in resource.data) || request.resource.data.createdByAdminUid == resource.data.createdByAdminUid)
+          )
+        )
+      ) || (
+        isAuthenticated() &&
+        (!('source' in resource.data) || resource.data.source == 'online') &&
+        resource.data.userId is string &&
+        resource.data.userId == request.auth.uid &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attended', 'checkInAt', 'checkInSequenceNumber', 'attendedSessions'])
       );
-      // แก้ไข: อนุญาตให้ User สามารถกดยกเลิกการลงทะเบียนของตัวเองได้
-      allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
-    }
-
-    function expectedEvaluationId(courseId, uid) {
-      return 'eval_' + string(courseId.size()) + '_' + courseId + '_' + uid;
-    }
-
-    function isValidRatingsMap(ratings) {
-      return ratings is map &&
-             ratings.keys().hasOnly(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']) &&
-             ratings.keys().hasAll(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']) &&
-             ratings['0'] is int && ratings['0'] >= 1 && ratings['0'] <= 5 &&
-             ratings['1'] is int && ratings['1'] >= 1 && ratings['1'] <= 5 &&
-             ratings['2'] is int && ratings['2'] >= 1 && ratings['2'] <= 5 &&
-             ratings['3'] is int && ratings['3'] >= 1 && ratings['3'] <= 5 &&
-             ratings['4'] is int && ratings['4'] >= 1 && ratings['4'] <= 5 &&
-             ratings['5'] is int && ratings['5'] >= 1 && ratings['5'] <= 5 &&
-             ratings['6'] is int && ratings['6'] >= 1 && ratings['6'] <= 5 &&
-             ratings['7'] is int && ratings['7'] >= 1 && ratings['7'] <= 5 &&
-             ratings['8'] is int && ratings['8'] >= 1 && ratings['8'] <= 5 &&
-             ratings['9'] is int && ratings['9'] >= 1 && ratings['9'] <= 5;
-    }
-
-    function isValidEvaluation(data) {
-      return data.keys().hasAll(['courseId', 'userId', 'ratings']) &&
-             data.keys().hasOnly(['courseId', 'userId', 'userEmail', 'userName', 'ratings', 'suggestion', 'createdAt']) &&
-             data.courseId is string && data.courseId.size() > 0 && data.courseId.size() <= 128 &&
-             !data.courseId.matches('.*/.*') &&
-             data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
-             !data.userId.matches('.*/.*') &&
-             (!('userEmail' in data) || data.userEmail == null || (data.userEmail is string && data.userEmail.size() <= 254)) &&
-             (!('userName' in data) || (data.userName is string && data.userName.size() <= 256)) &&
-             isValidRatingsMap(data.ratings) &&
-             (!('suggestion' in data) || (data.suggestion is string && data.suggestion.size() <= 5000)) &&
-             (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64));
+      // อนุญาตให้ Admin ลบได้ทั้งหมด หรือ User ลบรายการ online ของตนเอง
+      allow delete: if isAdmin() || (
+        isAuthenticated() &&
+        (!('source' in resource.data) || resource.data.source == 'online') &&
+        resource.data.userId is string &&
+        resource.data.userId == request.auth.uid
+      );
     }
 
     match /evaluations/{evaluationId} {
-      allow get: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();
-      allow list: if (isAuthenticated() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow get, list: if (
+        isAuthenticated() &&
+        resource.data.userId == request.auth.uid
+      ) || isAdmin();
+
       allow create: if isAuthenticated() &&
-                       request.resource.data.userId == request.auth.uid &&
-                       isValidEvaluation(request.resource.data) &&
-                       evaluationId == expectedEvaluationId(request.resource.data.courseId, request.auth.uid) &&
-                       exists(/databases/$(database)/documents/courses/$(request.resource.data.courseId));
+        request.resource.data.userId == request.auth.uid;
+
       allow update, delete: if isAdmin();
     }
 

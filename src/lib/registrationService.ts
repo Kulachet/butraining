@@ -9,12 +9,232 @@ import {
   updateDoc, 
   doc, 
   getDoc,
+  setDoc,
   serverTimestamp,
   runTransaction
 } from "firebase/firestore";
-import { db } from "./firebase";
-import { Registration, Course, Instructor, Session, SessionAttendance } from "../types";
+import { db, auth } from "./firebase";
+import { Registration, RegistrationSource, Course, Instructor, Session, SessionAttendance } from "../types";
 import { formatInstructorName, getCourseSessions, isMultiDayCourse } from "./utils";
+
+const BU_EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@bu\.ac\.th$/i;
+
+export interface WalkInFormInput {
+  instructorId?: string;
+  userName: string;
+  userEmail: string;
+  userDepartment: string;
+  userPosition?: string;
+  checkInAt: string;
+  sessionId?: string;
+  confirmAttended: boolean;
+}
+
+export interface WalkInValidationResult {
+  isValid: boolean;
+  errors: {
+    instructorId?: string;
+    userName?: string;
+    userEmail?: string;
+    userDepartment?: string;
+    checkInAt?: string;
+    confirmAttended?: string;
+    general?: string;
+  };
+}
+
+export function getRegistrationSource(reg: Partial<Registration> | null | undefined): RegistrationSource {
+  return reg?.source === "walk_in" ? "walk_in" : "online";
+}
+
+export function findDuplicateCourseRegistration(
+  registrations: Registration[],
+  criteria: { email?: string; instructorId?: string; excludeRegId?: string }
+): Registration | null {
+  const emailNorm = (criteria.email || "").trim().toLowerCase();
+  const idNorm = (criteria.instructorId || "").trim().toLowerCase();
+
+  if (!emailNorm && !idNorm) return null;
+
+  for (const reg of registrations) {
+    if (criteria.excludeRegId && reg.id === criteria.excludeRegId) continue;
+
+    const regEmail = (reg.userEmail || "").trim().toLowerCase();
+    const regInstId = (reg.instructorId || "").trim().toLowerCase();
+
+    if (emailNorm && regEmail && regEmail === emailNorm) {
+      return reg;
+    }
+    if (idNorm && regInstId && regInstId === idNorm) {
+      return reg;
+    }
+  }
+
+  return null;
+}
+
+export function validateWalkInFormData(
+  input: WalkInFormInput,
+  options: { requireAttendanceConfirmation?: boolean } = {}
+): WalkInValidationResult {
+  const errors: WalkInValidationResult["errors"] = {};
+  const cleanName = (input.userName || "").trim();
+  const cleanEmail = (input.userEmail || "").trim().toLowerCase();
+  const cleanDept = (input.userDepartment || "").trim();
+
+  if (!cleanName) {
+    errors.userName = "กรุณากรอกชื่อ-นามสกุลผู้เข้าร่วมอบรม";
+  }
+
+  if (!cleanEmail) {
+    errors.userEmail = "กรุณากรอกอีเมลมหาวิทยาลัย (@bu.ac.th)";
+  } else if (!BU_EMAIL_REGEX.test(cleanEmail)) {
+    errors.userEmail = "อีเมลต้องใช้นามสกุล @bu.ac.th เท่านั้น";
+  }
+
+  if (!cleanDept) {
+    errors.userDepartment = "กรุณาเลือกหรือระบุคณะ / หน่วยงาน";
+  }
+
+  if (!input.checkInAt || isNaN(new Date(input.checkInAt).getTime())) {
+    errors.checkInAt = "กรุณาระบุวันและเวลาเข้าอบรมที่ถูกต้อง";
+  }
+
+  if (options.requireAttendanceConfirmation !== false && !input.confirmAttended) {
+    errors.confirmAttended = "กรุณายืนยันว่าผู้เข้าร่วมได้เข้าอบรมจริง";
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+  };
+}
+
+function sanitizeDocIdSegment(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120);
+}
+
+export function buildWalkInDocId(courseId: string, email: string, instructorId?: string): string {
+  const coursePart = sanitizeDocIdSegment(courseId) || "course";
+  const identityRaw = email?.trim() ? email.trim().toLowerCase() : (instructorId || "").trim().toLowerCase();
+  const identityPart = sanitizeDocIdSegment(identityRaw) || `w_${Date.now()}`;
+  return `walkin_${coursePart}_${identityPart}`;
+}
+
+export function buildSessionAttendanceEntry(params: {
+  attended: boolean;
+  checkInAt?: string | null;
+  checkInSequenceNumber?: number | null;
+  sessionDate?: string | null;
+  sessionName?: string | null;
+}): SessionAttendance {
+  const entry: SessionAttendance = {
+    attended: Boolean(params.attended),
+  };
+
+  if (params.attended) {
+    if (params.checkInAt) {
+      entry.checkInAt = params.checkInAt;
+    }
+    if (
+      typeof params.checkInSequenceNumber === "number" &&
+      !isNaN(params.checkInSequenceNumber) &&
+      params.checkInSequenceNumber > 0
+    ) {
+      entry.checkInSequenceNumber = params.checkInSequenceNumber;
+    }
+  }
+
+  if (params.sessionDate) {
+    entry.sessionDate = params.sessionDate;
+  }
+  if (params.sessionName) {
+    entry.sessionName = params.sessionName;
+  }
+
+  return entry;
+}
+
+export function sanitizeAttendedSessionsMap(
+  map?: Record<string, SessionAttendance> | null
+): Record<string, SessionAttendance> {
+  const clean: Record<string, SessionAttendance> = {};
+  if (!map || typeof map !== "object") return clean;
+
+  for (const [key, val] of Object.entries(map)) {
+    if (!val || typeof val !== "object") continue;
+    clean[key] = buildSessionAttendanceEntry({
+      attended: Boolean(val.attended),
+      checkInAt: val.checkInAt ?? null,
+      checkInSequenceNumber: val.checkInSequenceNumber ?? null,
+      sessionDate: val.sessionDate ?? null,
+      sessionName: val.sessionName ?? null,
+    });
+  }
+
+  return clean;
+}
+
+export function buildCandidateOnlineDocIds(
+  course: Pick<Course, "id" | "sessions">,
+  uid: string,
+  targetSessionId?: string
+): string[] {
+  if (!course?.id || !uid) return [];
+  const ids = new Set<string>([
+    `${course.id}_${uid}`,
+    `${course.id}_default_${uid}`,
+  ]);
+  if (targetSessionId) {
+    ids.add(`${course.id}_${targetSessionId}_${uid}`);
+  }
+  if (Array.isArray(course.sessions)) {
+    for (const s of course.sessions) {
+      const sid = (s as any)?.sessionId || s?.id;
+      if (sid) ids.add(`${course.id}_${sid}_${uid}`);
+    }
+  }
+  return Array.from(ids);
+}
+
+async function findLinkedInstructorUids(
+  rawEmail: string,
+  cleanEmail: string,
+  cleanInstructorId: string
+): Promise<string[]> {
+  const uids = new Set<string>();
+  try {
+    const emailCandidates = Array.from(
+      new Set([cleanEmail, rawEmail.trim()].filter(Boolean))
+    );
+    for (const em of emailCandidates) {
+      const snap = await getDocs(
+        query(collection(db, "instructors"), where("email", "==", em), limit(5))
+      );
+      snap.forEach((d) => {
+        const uid = d.data()?.uid;
+        if (typeof uid === "string" && uid.trim()) uids.add(uid.trim());
+      });
+    }
+    if (cleanInstructorId) {
+      const idSnap = await getDocs(
+        query(collection(db, "instructors"), where("id", "==", cleanInstructorId), limit(5))
+      );
+      idSnap.forEach((d) => {
+        const uid = d.data()?.uid;
+        if (typeof uid === "string" && uid.trim()) uids.add(uid.trim());
+      });
+    }
+  } catch {
+    // Best-effort lookup; pre-transaction course query + deterministic refs still guard writes
+  }
+  return Array.from(uids);
+}
 
 export const RegistrationService = {
   async registerForCourse(course: Course, instructor: Instructor, session?: Session) {
@@ -41,10 +261,21 @@ export const RegistrationService = {
       throw new Error("Already registered for this course");
     }
 
-    // (B) Verify remaining capacity against actual unique active registrations in Firestore
+    // (B) Verify remaining capacity and check cross-source duplicates (including Walk-in)
     const allRegsSnap = await getDocs(
       query(collection(db, "registrations"), where("courseId", "==", course.id))
     );
+    const existingCourseRegs = allRegsSnap.docs.map(
+      (d) => ({ id: d.id, ...d.data() } as Registration)
+    );
+    const crossSourceDup = findDuplicateCourseRegistration(existingCourseRegs, {
+      email: instructor.email,
+      instructorId: instructor.id,
+    });
+    if (crossSourceDup) {
+      throw new Error("Already registered for this course");
+    }
+
     const actualRegisteredCount = allRegsSnap.size;
     const maxCapacity = course.maxSeats || (course.sessions && course.sessions[0]?.maxSeats) || 50;
     if (actualRegisteredCount >= maxCapacity) {
@@ -62,9 +293,14 @@ export const RegistrationService = {
     const regId = `${course.id}_${targetSessionId}_${instructor.uid}`;
     const regRef = doc(db, "registrations", regId);
 
-    // Deterministic legacy references to check inside transaction
+    // Deterministic legacy & walk-in references to check inside transaction
     const legacyRef = doc(db, "registrations", `${course.id}_${instructor.uid}`);
     const defaultRef = doc(db, "registrations", `${course.id}_default_${instructor.uid}`);
+    const walkInRef = doc(
+      db,
+      "registrations",
+      buildWalkInDocId(course.id, instructor.email || "", instructor.id)
+    );
 
     return await runTransaction(db, async (transaction) => {
       // 2. Transactional uniqueness checks:
@@ -76,6 +312,9 @@ export const RegistrationService = {
 
       const defaultDoc = await transaction.get(defaultRef);
       if (defaultDoc.exists()) throw new Error("Already registered for this course");
+
+      const walkInDoc = await transaction.get(walkInRef);
+      if (walkInDoc.exists()) throw new Error("Already registered for this course");
 
       // 3. Get fresh course data to verify capacity and compute sequence
       const courseDoc = await transaction.get(courseRef);
@@ -124,6 +363,7 @@ export const RegistrationService = {
         courseTitle: course.title,
         sessionId: targetSessionId,
         sessionName: targetSessionName,
+        source: "online" as RegistrationSource,
         userId: instructor.uid,
         instructorId: instructor.id,
         userName: instructor.name,
@@ -250,6 +490,9 @@ export const RegistrationService = {
       const regData = regDoc.data() as Registration;
 
       // Ownership and identifiers verification
+      if (regData.source === "walk_in") {
+        throw new Error("ไม่สามารถยกเลิกรายการ Walk-in ด้วยตนเองได้");
+      }
       if (regData.userId !== userId) {
         throw new Error("คุณไม่มีสิทธิ์ยกเลิกการลงทะเบียนนี้");
       }
@@ -517,17 +760,18 @@ export const RegistrationService = {
     if (!regSnap.exists()) throw new Error("ไม่พบข้อมูลการลงทะเบียน");
 
     const data = regSnap.data() as Registration;
-    const currentMap = data.attendedSessions || {};
+    const currentMap = sanitizeAttendedSessionsMap(data.attendedSessions);
+    const prevSession = currentMap[sessionId];
 
     const updatedMap: Record<string, SessionAttendance> = {
       ...currentMap,
-      [sessionId]: {
+      [sessionId]: buildSessionAttendanceEntry({
         attended: newStatus,
-        checkInAt: newStatus ? (currentMap[sessionId]?.checkInAt || new Date().toISOString()) : undefined,
-        checkInSequenceNumber: newStatus ? (currentMap[sessionId]?.checkInSequenceNumber || 1) : undefined,
-        sessionDate: sessionDate || currentMap[sessionId]?.sessionDate,
-        sessionName: sessionName || currentMap[sessionId]?.sessionName,
-      },
+        checkInAt: newStatus ? (prevSession?.checkInAt || new Date().toISOString()) : null,
+        checkInSequenceNumber: newStatus ? (prevSession?.checkInSequenceNumber || 1) : null,
+        sessionDate: sessionDate || prevSession?.sessionDate || null,
+        sessionName: sessionName || prevSession?.sessionName || null,
+      }),
     };
 
     // Calculate overall attended flag: true if any session was attended
@@ -643,5 +887,463 @@ export const RegistrationService = {
         createdAt: serverTimestamp(),
       });
     }
-  }
+  },
+
+  /**
+   * Administrator-only: Creates a verified Walk-in attendance record without requiring
+   * a Firebase Auth UID or self-registration account.
+   * Uses a deterministic Walk-in document ID inside a Firestore transaction to prevent
+   * concurrent duplicates.
+   */
+  async addWalkInParticipant(
+    course: Course,
+    input: WalkInFormInput
+  ): Promise<Registration> {
+    const adminUser = auth.currentUser;
+    if (!adminUser?.uid) {
+      throw new Error("กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบก่อนทำรายการ");
+    }
+    if (!course?.id) {
+      throw new Error("ไม่พบข้อมูลหลักสูตร");
+    }
+
+    const validation = validateWalkInFormData(input, {
+      requireAttendanceConfirmation: true,
+    });
+    if (!validation.isValid) {
+      const firstErr = Object.values(validation.errors)[0] || "ข้อมูล Walk-in ไม่ครบถ้วน";
+      throw new Error(firstErr);
+    }
+
+    const cleanEmail = input.userEmail.trim().toLowerCase();
+    const cleanName = input.userName.trim();
+    const cleanDept = input.userDepartment.trim();
+    const cleanPosition = (input.userPosition || "").trim();
+    const cleanInstructorId = (input.instructorId || "").trim();
+    const checkInIso = new Date(input.checkInAt).toISOString();
+    const nowIso = new Date().toISOString();
+
+    const courseRef = doc(db, "courses", course.id);
+    const courseRegsSnap = await getDocs(
+      query(collection(db, "registrations"), where("courseId", "==", course.id))
+    );
+    const existingRegs = courseRegsSnap.docs.map(
+      (d) => ({ id: d.id, ...d.data() } as Registration)
+    );
+
+    const duplicate = findDuplicateCourseRegistration(existingRegs, {
+      email: cleanEmail,
+      instructorId: cleanInstructorId,
+    });
+    if (duplicate) {
+      const dupErr = Object.assign(
+        new Error(`พบรายชื่อ "${duplicate.userName}" ลงทะเบียนในหลักสูตรนี้แล้ว`),
+        { code: "DUPLICATE_REGISTRATION", existingRegistration: duplicate }
+      );
+      throw dupErr;
+    }
+
+    const walkInDocId = buildWalkInDocId(course.id, cleanEmail, cleanInstructorId);
+    const walkInRef = doc(db, "registrations", walkInDocId);
+
+    const courseSessions = getCourseSessions(course);
+    const isMulti = courseSessions.length > 1;
+    const activeSession =
+      (input.sessionId &&
+        courseSessions.find(
+          (s) => s.id === input.sessionId || (s as any).sessionId === input.sessionId
+        )) ||
+      courseSessions[0] ||
+      null;
+
+    const targetSessionId = isMulti
+      ? activeSession?.id || (activeSession as any)?.sessionId || "default"
+      : (activeSession as any)?.sessionId || activeSession?.id || "default";
+    const targetSessionName = isMulti
+      ? activeSession?.sessionName || "วันอบรม"
+      : activeSession?.sessionName || null;
+
+    const linkedUids = await findLinkedInstructorUids(
+      input.userEmail,
+      cleanEmail,
+      cleanInstructorId
+    );
+    const candidateOnlineRefs = linkedUids.flatMap((uid) =>
+      buildCandidateOnlineDocIds(course, uid, targetSessionId)
+        .filter((id) => id !== walkInDocId)
+        .map((id) => doc(db, "registrations", id))
+    );
+
+    const maxExistingSeq = existingRegs.reduce(
+      (max, r) => Math.max(max, Number(r.sequenceNumber) || 0),
+      0
+    );
+    const maxCheckInSeq = existingRegs.reduce(
+      (max, r) => Math.max(max, Number(r.checkInSequenceNumber) || 0),
+      0
+    );
+
+    return await runTransaction(db, async (transaction) => {
+      const existingWalkInSnap = await transaction.get(walkInRef);
+      if (existingWalkInSnap.exists()) {
+        const dupErr = Object.assign(
+          new Error("มีข้อมูลผู้เข้าอบรมรายนี้ในหลักสูตรแล้ว"),
+          {
+            code: "DUPLICATE_REGISTRATION",
+            existingRegistration: {
+              id: existingWalkInSnap.id,
+              ...existingWalkInSnap.data(),
+            } as Registration,
+          }
+        );
+        throw dupErr;
+      }
+
+      for (const onlineRef of candidateOnlineRefs) {
+        const onlineSnap = await transaction.get(onlineRef);
+        if (onlineSnap.exists()) {
+          const existingOnline = {
+            id: onlineSnap.id,
+            ...onlineSnap.data(),
+          } as Registration;
+          const dupErr = Object.assign(
+            new Error(`พบรายชื่อ "${existingOnline.userName}" ลงทะเบียนออนไลน์ในหลักสูตรนี้แล้ว`),
+            {
+              code: "DUPLICATE_REGISTRATION",
+              existingRegistration: existingOnline,
+            }
+          );
+          throw dupErr;
+        }
+      }
+
+      const courseSnap = await transaction.get(courseRef);
+      if (!courseSnap.exists()) {
+        throw new Error("ไม่พบข้อมูลหลักสูตรในระบบ");
+      }
+
+      const currentCourse = courseSnap.data() as Course;
+      const nextSequence =
+        Math.max(
+          Number(currentCourse.totalRegistrations) || 0,
+          maxExistingSeq,
+          existingRegs.length
+        ) + 1;
+      const nextCheckInSeq = maxCheckInSeq + 1;
+
+      let updatedSessions = [...(currentCourse.sessions || [])];
+      let newEnrolled = (Number(currentCourse.enrolledSeats) || existingRegs.length) + 1;
+
+      if (isMulti && updatedSessions.length > 0) {
+        updatedSessions = updatedSessions.map((s) => ({
+          ...s,
+          enrolledSeats: (Number(s.enrolledSeats) || 0) + 1,
+        }));
+      } else if (updatedSessions.length > 0) {
+        const sIdx = updatedSessions.findIndex((s) => s.sessionId === targetSessionId);
+        const idxToBump = sIdx !== -1 ? sIdx : 0;
+        updatedSessions[idxToBump] = {
+          ...updatedSessions[idxToBump],
+          enrolledSeats: (Number(updatedSessions[idxToBump].enrolledSeats) || 0) + 1,
+        };
+        newEnrolled = updatedSessions.reduce((sum, s) => sum + (Number(s.enrolledSeats) || 0), 0);
+      }
+
+      const attendedSessions: Record<string, SessionAttendance> = {};
+      if (targetSessionId) {
+        attendedSessions[targetSessionId] = buildSessionAttendanceEntry({
+          attended: true,
+          checkInAt: checkInIso,
+          checkInSequenceNumber: nextCheckInSeq,
+          sessionDate: activeSession?.date || course.date || null,
+          sessionName: targetSessionName || "การอบรม",
+        });
+      }
+
+      const newWalkInData: Omit<Registration, "id"> = {
+        courseId: course.id,
+        courseTitle: course.title,
+        sessionId: targetSessionId,
+        ...(targetSessionName ? { sessionName: targetSessionName } : {}),
+        source: "walk_in",
+        userId: null,
+        instructorId: cleanInstructorId,
+        userName: cleanName,
+        userEmail: cleanEmail,
+        userPosition: cleanPosition,
+        userDepartment: cleanDept,
+        sequenceNumber: nextSequence,
+        checkInSequenceNumber: nextCheckInSeq,
+        checkInAt: checkInIso,
+        attended: true,
+        attendedSessions,
+        registeredAt: checkInIso,
+        createdByAdminUid: adminUser.uid,
+        createdByAdminEmail: adminUser.email || "",
+        createdAt: nowIso,
+        updatedByAdminUid: adminUser.uid,
+        updatedAt: nowIso,
+      };
+
+      transaction.update(courseRef, {
+        sessions: updatedSessions,
+        enrolledSeats: newEnrolled,
+        totalRegistrations: nextSequence,
+      });
+
+      transaction.set(walkInRef, newWalkInData);
+
+      return { id: walkInRef.id, ...newWalkInData };
+    });
+  },
+
+  /**
+   * Administrator-only: Marks an existing registered participant (typically Online)
+   * as attended without creating a duplicate registration document.
+   */
+  async markExistingAsAttended(params: {
+    registrationId: string;
+    course: Course;
+    checkInAt?: string;
+    sessionId?: string;
+  }): Promise<Registration> {
+    const adminUser = auth.currentUser;
+    if (!adminUser?.uid) {
+      throw new Error("กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบก่อนทำรายการ");
+    }
+
+    const regRef = doc(db, "registrations", params.registrationId);
+    const checkInIso = params.checkInAt
+      ? new Date(params.checkInAt).toISOString()
+      : new Date().toISOString();
+    const nowIso = new Date().toISOString();
+
+    const courseRegsSnap = await getDocs(
+      query(collection(db, "registrations"), where("courseId", "==", params.course.id))
+    );
+    const maxCheckInSeq = courseRegsSnap.docs.reduce((max, d) => {
+      const val = Number(d.data()?.checkInSequenceNumber) || 0;
+      return val > max ? val : max;
+    }, 0);
+
+    const courseSessions = getCourseSessions(params.course);
+    const isMulti = courseSessions.length > 1;
+    const activeSession =
+      (params.sessionId &&
+        courseSessions.find(
+          (s) => s.id === params.sessionId || (s as any).sessionId === params.sessionId
+        )) ||
+      courseSessions[0] ||
+      null;
+    const targetSessionId =
+      activeSession?.id || (activeSession as any)?.sessionId || "default";
+
+    return await runTransaction(db, async (transaction) => {
+      const regSnap = await transaction.get(regRef);
+      if (!regSnap.exists()) {
+        throw new Error("ไม่พบข้อมูลการลงทะเบียน");
+      }
+
+      const existing = { id: regSnap.id, ...regSnap.data() } as Registration;
+      const assignedSeq = existing.checkInSequenceNumber || maxCheckInSeq + 1;
+      const assignedCheckInAt = existing.checkInAt || checkInIso;
+
+      const existingSessionsMap = sanitizeAttendedSessionsMap(existing.attendedSessions);
+      const nextSessionsMap: Record<string, SessionAttendance> =
+        isMulti || targetSessionId
+          ? {
+              ...existingSessionsMap,
+              [targetSessionId]: buildSessionAttendanceEntry({
+                attended: true,
+                checkInAt: checkInIso,
+                checkInSequenceNumber:
+                  existingSessionsMap[targetSessionId]?.checkInSequenceNumber || assignedSeq,
+                sessionDate: activeSession?.date || params.course.date || null,
+                sessionName: activeSession?.sessionName || "วันอบรม",
+              }),
+            }
+          : existingSessionsMap;
+
+      const updates = {
+        attended: true,
+        checkInAt: assignedCheckInAt,
+        checkInSequenceNumber: assignedSeq,
+        attendedSessions: nextSessionsMap,
+        updatedByAdminUid: adminUser.uid,
+        updatedAt: nowIso,
+      };
+
+      transaction.update(regRef, updates);
+
+      return { ...existing, ...updates };
+    });
+  },
+
+  /**
+   * Administrator-only: Updates information or attendance details of an existing
+   * Walk-in participant record while preserving `source: 'walk_in'` and `userId: null`.
+   * Uses a Firestore transaction to prevent concurrent email/instructorId collisions and
+   * omits undefined nested fields so toggling attendance (true <-> false) always succeeds.
+   */
+  async updateWalkInParticipant(
+    registrationId: string,
+    course: Course,
+    input: WalkInFormInput
+  ): Promise<Registration> {
+    const adminUser = auth.currentUser;
+    if (!adminUser?.uid) {
+      throw new Error("กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแลระบบก่อนทำรายการ");
+    }
+
+    const validation = validateWalkInFormData(input, {
+      requireAttendanceConfirmation: false,
+    });
+    if (!validation.isValid) {
+      const firstErr = Object.values(validation.errors)[0] || "ข้อมูล Walk-in ไม่ถูกต้อง";
+      throw new Error(firstErr);
+    }
+
+    const cleanEmail = input.userEmail.trim().toLowerCase();
+    const cleanName = input.userName.trim();
+    const cleanDept = input.userDepartment.trim();
+    const cleanPosition = (input.userPosition || "").trim();
+    const cleanInstructorId = (input.instructorId || "").trim();
+    const checkInIso = new Date(input.checkInAt).toISOString();
+    const nowIso = new Date().toISOString();
+
+    const courseRegsSnap = await getDocs(
+      query(collection(db, "registrations"), where("courseId", "==", course.id))
+    );
+    const existingRegs = courseRegsSnap.docs.map(
+      (d) => ({ id: d.id, ...d.data() } as Registration)
+    );
+
+    const duplicate = findDuplicateCourseRegistration(existingRegs, {
+      email: cleanEmail,
+      instructorId: cleanInstructorId,
+      excludeRegId: registrationId,
+    });
+    if (duplicate) {
+      throw new Error(
+        `ข้อมูลอีเมลหรือรหัสอาจารย์ซ้ำกับผู้เข้าร่วมรายอื่นในหลักสูตรนี้ (${duplicate.userName})`
+      );
+    }
+
+    const regRef = doc(db, "registrations", registrationId);
+    const newWalkInDocId = buildWalkInDocId(course.id, cleanEmail, cleanInstructorId);
+    const newWalkInRef =
+      newWalkInDocId !== registrationId
+        ? doc(db, "registrations", newWalkInDocId)
+        : null;
+
+    const courseSessions = getCourseSessions(course);
+    const linkedUids = await findLinkedInstructorUids(
+      input.userEmail,
+      cleanEmail,
+      cleanInstructorId
+    );
+    const candidateOnlineRefs = linkedUids.flatMap((uid) =>
+      buildCandidateOnlineDocIds(course, uid, input.sessionId)
+        .filter((id) => id !== registrationId)
+        .map((id) => doc(db, "registrations", id))
+    );
+
+    return await runTransaction(db, async (transaction) => {
+      const regSnap = await transaction.get(regRef);
+      if (!regSnap.exists()) {
+        throw new Error("ไม่พบข้อมูลผู้เข้าร่วม Walk-in");
+      }
+
+      if (newWalkInRef) {
+        const collisionSnap = await transaction.get(newWalkInRef);
+        if (collisionSnap.exists()) {
+          const colliding = collisionSnap.data() as Registration;
+          throw new Error(
+            `ข้อมูลอีเมลหรือรหัสอาจารย์ซ้ำกับผู้เข้าร่วมรายอื่นในหลักสูตรนี้ (${colliding.userName || cleanEmail})`
+          );
+        }
+      }
+
+      for (const onlineRef of candidateOnlineRefs) {
+        const onlineSnap = await transaction.get(onlineRef);
+        if (onlineSnap.exists()) {
+          const colliding = onlineSnap.data() as Registration;
+          throw new Error(
+            `พบการลงทะเบียนออนไลน์ของ "${colliding.userName || cleanEmail}" ในหลักสูตรนี้แล้ว`
+          );
+        }
+      }
+
+      const current = { id: regSnap.id, ...regSnap.data() } as Registration;
+      if (getRegistrationSource(current) !== "walk_in") {
+        throw new Error("ไม่สามารถแก้ไขข้อมูลส่วนตัวของผู้ลงทะเบียนออนไลน์ผ่านแบบฟอร์ม Walk-in ได้");
+      }
+
+      const activeSession =
+        (input.sessionId &&
+          courseSessions.find(
+            (s) => s.id === input.sessionId || (s as any).sessionId === input.sessionId
+          )) ||
+        courseSessions.find(
+          (s) => s.id === current.sessionId || (s as any).sessionId === current.sessionId
+        ) ||
+        courseSessions[0] ||
+        null;
+      const targetSessionId =
+        input.sessionId ||
+        current.sessionId ||
+        activeSession?.id ||
+        (activeSession as any)?.sessionId ||
+        "default";
+
+      const currentSessionsMap = sanitizeAttendedSessionsMap(current.attendedSessions);
+      const prevTargetSession = currentSessionsMap[targetSessionId];
+
+      const attended = Boolean(input.confirmAttended);
+      const nextCheckInSeq = attended
+        ? current.checkInSequenceNumber ||
+          prevTargetSession?.checkInSequenceNumber ||
+          existingRegs.reduce(
+            (max, r) => Math.max(max, Number(r.checkInSequenceNumber) || 0),
+            0
+          ) + 1
+        : null;
+
+      if (targetSessionId) {
+        currentSessionsMap[targetSessionId] = buildSessionAttendanceEntry({
+          attended,
+          checkInAt: attended ? checkInIso : null,
+          checkInSequenceNumber: attended ? nextCheckInSeq : null,
+          sessionDate:
+            activeSession?.date || prevTargetSession?.sessionDate || course.date || null,
+          sessionName:
+            activeSession?.sessionName ||
+            prevTargetSession?.sessionName ||
+            current.sessionName ||
+            "การอบรม",
+        });
+      }
+
+      const updates: Record<string, any> = {
+        instructorId: cleanInstructorId,
+        userName: cleanName,
+        userEmail: cleanEmail,
+        userDepartment: cleanDept,
+        userPosition: cleanPosition,
+        attended,
+        checkInAt: attended ? checkInIso : null,
+        checkInSequenceNumber: nextCheckInSeq,
+        attendedSessions: currentSessionsMap,
+        updatedByAdminUid: adminUser.uid,
+        updatedAt: nowIso,
+      };
+
+      transaction.update(regRef, updates);
+
+      return {
+        ...current,
+        ...updates,
+      } as Registration;
+    });
+  },
 };

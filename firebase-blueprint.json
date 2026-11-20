@@ -33,20 +33,23 @@
     },
     "registrations": {
       "title": "Registration",
-      "description": "A course registration record.",
+      "description": "A course registration or walk-in attendance record.",
       "type": "object",
       "properties": {
         "courseId": { "type": "string" },
+        "source": { "type": "string", "enum": ["online", "walk_in"] },
         "userId": { "type": "string" },
+        "instructorId": { "type": "string" },
         "userName": { "type": "string" },
         "userEmail": { "type": "string" },
         "userPosition": { "type": "string" },
         "userDepartment": { "type": "string" },
         "sequenceNumber": { "type": "integer" },
         "attended": { "type": "boolean" },
-        "registeredAt": { "type": "string", "format": "date-time" }
+        "registeredAt": { "type": "string", "format": "date-time" },
+        "createdByAdminUid": { "type": "string" }
       },
-      "required": ["courseId", "userId", "sequenceNumber", "attended"]
+      "required": ["courseId", "userName", "userEmail", "sequenceNumber", "attended"]
     },
     "mail": {
       "title": "Mail",

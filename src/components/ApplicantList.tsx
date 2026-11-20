@@ -306,9 +306,16 @@ export const ApplicantList: React.FC<Props> = ({ course }) => {
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-col">
-                        <span className="text-[14px] lg:text-[16px] font-normal text-[#333333]">
-                          {formatInstructorName(resolvedName, resolvedId, resolvedPos)}
-                        </span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[14px] lg:text-[16px] font-normal text-[#333333]">
+                            {formatInstructorName(resolvedName, resolvedId, resolvedPos)}
+                          </span>
+                          {reg.source === "walk_in" && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 uppercase tracking-wide">
+                              Walk-in
+                            </span>
+                          )}
+                        </div>
                         <span className="text-[12px] text-slate-400 font-normal">{reg.userEmail}</span>
                       </div>
                     </td>

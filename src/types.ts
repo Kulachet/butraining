@@ -80,13 +80,16 @@ export interface SessionAttendance {
   sessionName?: string;
 }
 
+export type RegistrationSource = 'online' | 'walk_in';
+
 export interface Registration {
   id: string;
   courseId: string;
   courseTitle?: string;
   sessionId?: string;
   sessionName?: string;
-  userId: string;
+  userId?: string | null;
+  source?: RegistrationSource;
   instructorId?: string;
   userName: string;
   userEnglishName?: string;
@@ -100,6 +103,11 @@ export interface Registration {
   attended: boolean;
   attendedSessions?: Record<string, SessionAttendance>;
   registeredAt: string;
+  createdByAdminUid?: string;
+  createdByAdminEmail?: string;
+  createdAt?: string;
+  updatedByAdminUid?: string;
+  updatedAt?: string;
   certStatus?: 'pending' | 'sent' | 'failed';
   certSentAt?: string;
 }

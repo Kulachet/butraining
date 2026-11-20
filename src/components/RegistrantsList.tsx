@@ -26,7 +26,9 @@ import {
   Square,
   FileCheck,
   XCircle,
-  Bell
+  Bell,
+  UserPlus,
+  Edit3
 } from "lucide-react";
 import { 
   collection, 
@@ -41,9 +43,11 @@ import {
   getDoc
 } from "firebase/firestore";
 import { db, auth } from "../lib/firebase";
-import { Course, Registration, SessionAttendance } from "../types";
+import { Course, Instructor, Registration, SessionAttendance } from "../types";
 import { cn, formatInstructorName, getCourseSessions, isMultiDayCourse, formatDateThai } from "../lib/utils";
-import { RegistrationService } from "../lib/registrationService";
+import { RegistrationService, getRegistrationSource } from "../lib/registrationService";
+import { useAuth } from "./AuthProvider";
+import { WalkInModal } from "./WalkInModal";
 import {
   resolveInitialPublicAppUrl,
   validatePublicAppUrl,
@@ -57,6 +61,7 @@ import { QRCodeSVG } from "qrcode.react";
 import Papa from "papaparse";
 
 export const RegistrantsList: React.FC = () => {
+  const { isAdmin } = useAuth();
   const [courses, setCourses] = useState<Course[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
   const [registrations, setRegistrations] = useState<Registration[]>([]);
@@ -127,6 +132,9 @@ export const RegistrantsList: React.FC = () => {
   const [instructorRecords, setInstructorRecords] = useState<
     Record<string, { id: string; name: string; position?: string; englishFullName?: string; englishNameVerified?: boolean }>
   >({});
+  const [allInstructors, setAllInstructors] = useState<Instructor[]>([]);
+  const [showWalkInModal, setShowWalkInModal] = useState(false);
+  const [editingWalkInReg, setEditingWalkInReg] = useState<Registration | null>(null);
 
   useEffect(() => {
     const fetchInstructors = async () => {
@@ -134,8 +142,21 @@ export const RegistrantsList: React.FC = () => {
         const snap = await getDocs(collection(db, "instructors"));
         const map: Record<string, string> = {};
         const records: Record<string, { id: string; name: string; position?: string; englishFullName?: string; englishNameVerified?: boolean }> = {};
-        snap.docs.forEach(doc => {
-          const data = doc.data();
+        const list: Instructor[] = [];
+        snap.docs.forEach(docSnap => {
+          const data = docSnap.data();
+          const instId = data.id || docSnap.id;
+          list.push({
+            uid: data.uid || docSnap.id,
+            id: instId,
+            name: data.name || "",
+            englishFullName: data.englishFullName,
+            englishNameVerified: data.englishNameVerified,
+            email: data.email || "",
+            department: data.department || "",
+            position: data.position,
+            createdAt: data.createdAt || "",
+          });
           if (data.id) {
             const instObj = {
               id: data.id,
@@ -156,6 +177,7 @@ export const RegistrantsList: React.FC = () => {
         });
         setInstructorMap(map);
         setInstructorRecords(records);
+        setAllInstructors(list);
       } catch (error) {
         console.error("Error fetching instructors:", error);
       }
@@ -256,6 +278,26 @@ export const RegistrantsList: React.FC = () => {
 
   const selectedCourse = useMemo(() => courses.find(c => c.id === selectedCourseId), [courses, selectedCourseId]);
   const isMulti = useMemo(() => selectedCourse ? isMultiDayCourse(selectedCourse) : false, [selectedCourse]);
+
+  const attendanceSummary = useMemo(() => {
+    let attendedCount = 0;
+    let onlineCount = 0;
+    let walkInCount = 0;
+    registrations.forEach((r) => {
+      if (r.attended) attendedCount += 1;
+      if (getRegistrationSource(r) === "walk_in") {
+        walkInCount += 1;
+      } else {
+        onlineCount += 1;
+      }
+    });
+    return {
+      totalCount: registrations.length,
+      attendedCount,
+      onlineCount,
+      walkInCount,
+    };
+  }, [registrations]);
 
   const displaySessions = useMemo(() => {
     if (!selectedCourse) return [];
@@ -1022,23 +1064,35 @@ export const RegistrantsList: React.FC = () => {
         let enrolledSeats = currentCourse.enrolledSeats || 0;
         let totalRegistrations = currentCourse.totalRegistrations || 0;
         
-        if (sessionId) {
-          let sessionIndex = updatedSessions.findIndex(s => s.sessionId === sessionId);
-          
-          // If session ID not found (orphaned), default to the first session if available
-          if (sessionIndex === -1 && updatedSessions.length > 0) {
-            sessionIndex = 0;
+        if (isMultiDayCourse(currentCourse)) {
+          enrolledSeats = Math.max(0, enrolledSeats - 1);
+          updatedSessions = updatedSessions.map(s => ({
+            ...s,
+            enrolledSeats: Math.max(0, (s.enrolledSeats || 1) - 1)
+          }));
+        } else {
+          if (sessionId) {
+            let sessionIndex = updatedSessions.findIndex(s => s.sessionId === sessionId);
+            
+            // If session ID not found (orphaned), default to the first session if available
+            if (sessionIndex === -1 && updatedSessions.length > 0) {
+              sessionIndex = 0;
+            }
+
+            if (sessionIndex !== -1 && updatedSessions[sessionIndex].enrolledSeats > 0) {
+              updatedSessions[sessionIndex].enrolledSeats -= 1;
+            }
+          } else {
+            // Legacy course or single session
+            if (updatedSessions.length > 0 && updatedSessions[0].enrolledSeats > 0) {
+              updatedSessions[0].enrolledSeats -= 1;
+            } else if (enrolledSeats > 0) {
+              enrolledSeats -= 1;
+            }
           }
 
-          if (sessionIndex !== -1 && updatedSessions[sessionIndex].enrolledSeats > 0) {
-            updatedSessions[sessionIndex].enrolledSeats -= 1;
-          }
-        } else {
-          // Legacy course or single session
-          if (updatedSessions.length > 0 && updatedSessions[0].enrolledSeats > 0) {
-            updatedSessions[0].enrolledSeats -= 1;
-          } else if (enrolledSeats > 0) {
-            enrolledSeats -= 1;
+          if (updatedSessions.length > 0) {
+            enrolledSeats = updatedSessions.reduce((sum, s) => sum + (s.enrolledSeats || 0), 0);
           }
         }
 
@@ -1197,6 +1251,19 @@ export const RegistrantsList: React.FC = () => {
             <RefreshCw className="w-4 h-4" />
             ปรับปรุงลำดับที่
           </button>
+          {isAdmin && selectedCourse && selectedCourseId !== "all_courses" && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingWalkInReg(null);
+                setShowWalkInModal(true);
+              }}
+              className="flex items-center justify-center gap-2 px-4 py-2.5 bg-crimson hover:bg-crimson-dark text-white rounded-xl text-[13px] font-semibold transition-all shadow-sm"
+            >
+              <UserPlus className="w-4 h-4" />
+              เพิ่มผู้เข้าอบรม Walk-in
+            </button>
+          )}
           {selectedCourseId && (
             <button 
               onClick={() => {
@@ -1260,6 +1327,28 @@ export const RegistrantsList: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Live Attendance Summary Strip */}
+      {selectedCourse && selectedCourseId !== "all_courses" && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-white rounded-2xl border border-slate-200 px-4 py-3 flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-500">รายชื่อทั้งหมด</span>
+            <span className="text-base font-bold text-slate-800">{attendanceSummary.totalCount} คน</span>
+          </div>
+          <div className="bg-emerald-50/70 rounded-2xl border border-emerald-200 px-4 py-3 flex items-center justify-between">
+            <span className="text-xs font-medium text-emerald-700">มาอบรมจริง</span>
+            <span className="text-base font-bold text-emerald-800">{attendanceSummary.attendedCount} คน</span>
+          </div>
+          <div className="bg-slate-50 rounded-2xl border border-slate-200 px-4 py-3 flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-600">ลงทะเบียนออนไลน์</span>
+            <span className="text-base font-bold text-slate-800">{attendanceSummary.onlineCount} คน</span>
+          </div>
+          <div className="bg-amber-50/70 rounded-2xl border border-amber-200 px-4 py-3 flex items-center justify-between">
+            <span className="text-xs font-medium text-amber-700">Walk-in</span>
+            <span className="text-base font-bold text-amber-800">{attendanceSummary.walkInCount} คน</span>
+          </div>
+        </div>
+      )}
 
       {/* Table Section */}
       <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-xl overflow-hidden min-h-[400px]">
@@ -1355,14 +1444,30 @@ export const RegistrantsList: React.FC = () => {
                       )}
                       <td className="px-6 py-4">
                         <span className="text-[12px] lg:text-[13px] font-mono font-medium text-slate-400">
-                          {reg.instructorId || instructorMap[reg.userEmail] || "-"}
+                          {reg.instructorId ||
+                            (reg.userEmail
+                              ? instructorMap[reg.userEmail] ||
+                                instructorMap[reg.userEmail.toLowerCase().trim()]
+                              : undefined) ||
+                            "-"}
                         </span>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex flex-col">
-                          <span className="text-[14px] lg:text-[16px] font-normal text-[#333333]">
-                            {formatRegName(reg.userName, reg.userEmail, reg.instructorId, reg.userPosition)}
-                          </span>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[14px] lg:text-[16px] font-normal text-[#333333]">
+                              {formatRegName(reg.userName, reg.userEmail, reg.instructorId, reg.userPosition)}
+                            </span>
+                            {getRegistrationSource(reg) === "walk_in" ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 uppercase tracking-wide">
+                                Walk-in
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-200">
+                                Online
+                              </span>
+                            )}
+                          </div>
                           <span className="text-[12px] text-slate-400 font-medium uppercase tracking-wider">{reg.userPosition}</span>
                         </div>
                       </td>
@@ -1427,6 +1532,19 @@ export const RegistrantsList: React.FC = () => {
                                   </span>
                                 );
                               })()}
+                              {isAdmin && getRegistrationSource(reg) === "walk_in" && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingWalkInReg(reg);
+                                    setShowWalkInModal(true);
+                                  }}
+                                  className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-full transition-colors"
+                                  title="แก้ไขข้อมูล Walk-in"
+                                >
+                                  <Edit3 className="w-4 h-4" />
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleDeleteClick(reg.id, reg.courseId, reg.sessionId || null)}
                                 className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
@@ -1461,6 +1579,19 @@ export const RegistrantsList: React.FC = () => {
                                 </>
                               )}
                             </button>
+                            {isAdmin && getRegistrationSource(reg) === "walk_in" && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingWalkInReg(reg);
+                                  setShowWalkInModal(true);
+                                }}
+                                className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-full transition-colors"
+                                title="แก้ไขข้อมูล Walk-in"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                            )}
                             <button
                               onClick={() => handleDeleteClick(reg.id, reg.courseId, reg.sessionId || null)}
                               className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
@@ -2432,6 +2563,20 @@ export const RegistrantsList: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+      {/* Walk-in Participant Modal */}
+      {isAdmin && selectedCourse && (
+        <WalkInModal
+          isOpen={showWalkInModal}
+          onClose={() => {
+            setShowWalkInModal(false);
+            setEditingWalkInReg(null);
+          }}
+          course={selectedCourse}
+          courseRegistrations={registrations}
+          allInstructors={allInstructors}
+          editingRegistration={editingWalkInReg}
+        />
       )}
     </div>
   );

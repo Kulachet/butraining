@@ -155,11 +155,13 @@ export function buildActualAttendanceRows(
       if (courseId && reg.courseId !== courseId) return false;
       return Boolean(reg.attended);
     })
-    .sort(
-      (a, b) =>
+    .sort((a, b) => {
+      const diff =
         (Number(a.checkInSequenceNumber) || Number(a.sequenceNumber) || 0) -
-        (Number(b.checkInSequenceNumber) || Number(b.sequenceNumber) || 0)
-    );
+        (Number(b.checkInSequenceNumber) || Number(b.sequenceNumber) || 0);
+      if (diff !== 0) return diff;
+      return (Number(a.sequenceNumber) || 0) - (Number(b.sequenceNumber) || 0);
+    });
 
   return attendees.map((reg, index) => {
     const rawEmail = reg.userEmail ? String(reg.userEmail).trim() : "";
