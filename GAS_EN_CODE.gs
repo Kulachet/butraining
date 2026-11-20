@@ -97,6 +97,8 @@ function doPost(e) {
       return handleRemindersEn(data);
     } else if (action === "send_evaluations") {
       return handleEvaluationsEn(data);
+    } else if (action === "send_training_report") {
+      return handleTrainingReport(data);
     } else if (action === "validate_folder") {
       return validateFolder(data.folderId);
     } else {
@@ -696,6 +698,132 @@ function handleEvaluationsEn(data) {
   return ContentService.createTextOutput(
     JSON.stringify({ status: "success", successCount: successCount })
   ).setMimeType(ContentService.MimeType.JSON);
+}
+
+function handleTrainingReport(data) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    return ContentService.createTextOutput(
+      JSON.stringify({
+        status: "error",
+        code: "LOCK_TIMEOUT",
+        message: "Server busy processing another request. Please retry in a moment."
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  try {
+    var recipientEmail = (data.recipientEmail || "").trim().toLowerCase();
+    if (!recipientEmail || !isAuthorizedBuEmail(recipientEmail)) {
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          status: "error",
+          code: "INVALID_RECIPIENT",
+          message: "Recipient email must be an authorized @bu.ac.th address."
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var requestId = (data.requestId || "").trim();
+    if (requestId) {
+      var cache = CacheService.getScriptCache();
+      var cacheKey = "tr_sent_" + requestId;
+      var cached = cache.get(cacheKey);
+      if (cached) {
+        return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
+    var attachmentsInput = data.attachments || {};
+    var csvAtt = attachmentsInput.csv;
+    var pdfAtt = attachmentsInput.pdf;
+
+    if (!csvAtt || !csvAtt.base64 || !pdfAtt || !pdfAtt.base64) {
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          status: "error",
+          code: "MISSING_ATTACHMENTS",
+          message: "Both CSV and PDF attachments are required."
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var csvBytes = Utilities.base64Decode(csvAtt.base64);
+    var pdfBytes = Utilities.base64Decode(pdfAtt.base64);
+
+    if (!csvBytes || csvBytes.length === 0 || !pdfBytes || pdfBytes.length === 0) {
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          status: "error",
+          code: "EMPTY_ATTACHMENTS",
+          message: "Decoded attachments must not be empty."
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (MailApp.getRemainingDailyQuota() < 1) {
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          status: "error",
+          code: "QUOTA_EXCEEDED",
+          message: "Daily MailApp sending quota exceeded."
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var csvBlob = Utilities.newBlob(
+      csvBytes,
+      csvAtt.mimeType || "text/csv",
+      csvAtt.filename || "attendance.csv"
+    );
+    var pdfBlob = Utilities.newBlob(
+      pdfBytes,
+      pdfAtt.mimeType || "application/pdf",
+      pdfAtt.filename || "evaluation_overview.pdf"
+    );
+
+    var subject = data.subject || ("[BU Training] ส่งรายชื่อผู้เข้าอบรมจริงและผลประเมิน: " + (data.courseTitle || ""));
+    var body = data.body || "";
+    var htmlBody = data.htmlBody || "";
+    var senderName = data.senderName || "สำนักพัฒนาการเรียนรู้ (LDO) มหาวิทยาลัยกรุงเทพ";
+
+    var mailOptions = {
+      to: recipientEmail,
+      subject: subject,
+      body: body,
+      attachments: [csvBlob, pdfBlob],
+      name: senderName
+    };
+    if (htmlBody) {
+      mailOptions.htmlBody = htmlBody;
+    }
+
+    MailApp.sendEmail(mailOptions);
+
+    var responsePayload = JSON.stringify({
+      status: "success",
+      recipient: recipientEmail,
+      attachmentsCount: 2,
+      sentAt: new Date().toISOString(),
+      requestId: requestId || null
+    });
+
+    if (requestId) {
+      CacheService.getScriptCache().put("tr_sent_" + requestId, responsePayload, 600);
+    }
+
+    return ContentService.createTextOutput(responsePayload).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(
+      JSON.stringify({
+        status: "error",
+        code: "MAIL_SEND_FAILED",
+        message: err ? err.toString() : "Failed to send training report email"
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function validateFolder(folderId) {

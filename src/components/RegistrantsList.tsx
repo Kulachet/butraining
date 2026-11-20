@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { getRatingsArray } from "./analytics/types";
+import { buildAttendanceCsvFilename, generateActualAttendanceCsv } from "../lib/trainingReport";
 import { 
   Search, 
   Filter, 
@@ -762,40 +763,30 @@ export const RegistrantsList: React.FC = () => {
       return;
     }
 
-    const attendees = registrations
-      .filter(r => r.attended)
-      .sort((a, b) => (a.checkInSequenceNumber || a.sequenceNumber || 0) - (b.checkInSequenceNumber || b.sequenceNumber || 0));
+    const selectedCourse = courses.find(c => c.id === selectedCourseId);
+    const instructorList = Array.from(new Set(Object.values(instructorRecords)));
+    const { blob, filename, rowCount } = generateActualAttendanceCsv(
+      registrations,
+      instructorList,
+      selectedCourse?.title || "หลักสูตร",
+      selectedCourseId
+    );
 
-    if (attendees.length === 0) {
+    if (rowCount === 0) {
       toast.error("ไม่มีผู้เข้าร่วมอบรมที่เช็คอินแล้ว");
       return;
     }
 
-    const selectedCourse = courses.find(c => c.id === selectedCourseId);
-    
-    const data = attendees.map((reg, index) => ({
-      "ลำดับที่ (ใบประกาศ)": index + 1,
-      "ลำดับการเช็คอิน": reg.checkInSequenceNumber || "-",
-      "ลำดับ (ระบบ)": reg.sequenceNumber,
-      "รหัสอาจารย์": reg.instructorId || instructorMap[reg.userEmail] || "-",
-      "ชื่อ-นามสกุล": formatRegName(reg.userName, reg.userEmail, reg.instructorId, reg.userPosition),
-      "อีเมล": reg.userEmail,
-      "หน่วยงาน": reg.userDepartment,
-      "ตำแหน่ง": reg.userPosition,
-      "เวลาเช็คอิน": reg.checkInAt ? new Date(reg.checkInAt).toLocaleString('th-TH') : "-"
-    }));
-
-    const csv = Papa.unparse(data);
-    const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     const url = URL.createObjectURL(blob);
     link.setAttribute("href", url);
-    link.setAttribute("download", `รายชื่อผู้มาอบรมจริง_${selectedCourse?.title || 'หลักสูตร'}.csv`);
-    link.style.visibility = 'hidden';
+    link.setAttribute("download", filename || buildAttendanceCsvFilename(selectedCourse?.title));
+    link.style.visibility = "hidden";
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
     toast.success("ส่งออกรายชื่อผู้มาอบรมจริงเรียบร้อยแล้ว");
   };
 

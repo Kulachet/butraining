@@ -11,6 +11,8 @@ import {
 } from "../../lib/evaluationAnalytics";
 import { exportEvaluationPdf } from "../../lib/pdfExport";
 import { OverviewPdfReport } from "./OverviewPdfReport";
+import { TrainingReportEmailModal } from "./TrainingReportEmailModal";
+import { useAuth } from "../AuthProvider";
 
 import { 
   Users, 
@@ -29,7 +31,8 @@ import {
   BarChart3,
   Calendar,
   Sparkles,
-  Info
+  Info,
+  Mail
 } from "lucide-react";
 import { 
   ResponsiveContainer, 
@@ -123,6 +126,8 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     return calculateCourseOperationalStats(selectedCourse.id, data.registrations, data.evaluations);
   }, [selectedCourse, data.registrations, data.evaluations]);
 
+  const { isAdmin } = useAuth();
+
   // Interactive Inspector States
   const [selectedQuestionIdx, setSelectedQuestionIdx] = useState<number | null>(null);
   const [selectedScoreSegment, setSelectedScoreSegment] = useState<number | null>(null);
@@ -131,6 +136,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [pdfProgressText, setPdfProgressText] = useState("");
   const [showPdfPreview, setShowPdfPreview] = useState(false);
+  const [showTrainingReportModal, setShowTrainingReportModal] = useState(false);
 
   // Active inspected question
   const activeInspectedQuestion: QuestionStat | null = useMemo(() => {
@@ -268,6 +274,19 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
               </>
             )}
           </button>
+
+          {/* Admin-Only Training Attendance & Evaluation Report Email Button */}
+          {isAdmin && selectedCourse && (
+            <button
+              type="button"
+              onClick={() => setShowTrainingReportModal(true)}
+              className="flex items-center justify-center gap-2 px-4 py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-slate-900/15 cursor-pointer"
+              title="ส่งรายชื่อผู้เข้าอบรมจริง (CSV) และรายงานสรุปผลประเมิน (PDF) ทางอีเมล"
+            >
+              <Mail className="w-4 h-4" />
+              <span>ส่งรายงานการอบรม</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -775,6 +794,21 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Admin Training Attendance & Evaluation Report Email Modal */}
+      {isAdmin && selectedCourse && (
+        <TrainingReportEmailModal
+          isOpen={showTrainingReportModal}
+          onClose={() => setShowTrainingReportModal(false)}
+          course={selectedCourse}
+          registrations={data.registrations}
+          evaluations={data.evaluations}
+          instructors={data.instructors}
+          questions={DEFAULT_QUESTIONS}
+          precomputedAnalysis={analysis}
+          precomputedOperationalStats={operationalStats}
+        />
       )}
     </div>
   );

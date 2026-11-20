@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { collection, query, where, getDocs, onSnapshot, orderBy, doc, getDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { Course } from "../types";
+import { Course, Instructor, Registration } from "../types";
 import { 
   analyzeEvaluations, 
   DEFAULT_QUESTIONS, 
@@ -14,6 +14,8 @@ import { EvaluationQuestionsTab } from "./analytics/EvaluationQuestionsTab";
 import { EvaluationFeedbackTab } from "./analytics/EvaluationFeedbackTab";
 import { EvaluationCommentsListTab } from "./analytics/EvaluationCommentsListTab";
 import { EvaluationPdfReport } from "./analytics/EvaluationPdfReport";
+import { TrainingReportEmailModal } from "./analytics/TrainingReportEmailModal";
+import { useAuth } from "./AuthProvider";
 
 import { 
   BarChart3, 
@@ -29,7 +31,8 @@ import {
   Sparkles,
   Calendar,
   User,
-  CheckCircle2
+  CheckCircle2,
+  Mail
 } from "lucide-react";
 import Papa from "papaparse";
 import toast from "react-hot-toast";
@@ -38,6 +41,7 @@ import { formatInstructorName } from "../lib/utils";
 type ActiveTabType = "overview" | "questions" | "feedback" | "comments";
 
 export const EvaluationDashboard: React.FC = () => {
+  const { isAdmin } = useAuth();
   const [courses, setCourses] = useState<Course[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
   const [evaluations, setEvaluations] = useState<any[]>([]);
@@ -49,6 +53,12 @@ export const EvaluationDashboard: React.FC = () => {
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [pdfProgressText, setPdfProgressText] = useState("");
   const [showPdfPreview, setShowPdfPreview] = useState(false);
+
+  // Training Report Email Modal states
+  const [showTrainingReportModal, setShowTrainingReportModal] = useState(false);
+  const [isLoadingReportData, setIsLoadingReportData] = useState(false);
+  const [courseRegistrations, setCourseRegistrations] = useState<Registration[]>([]);
+  const [instructors, setInstructors] = useState<Instructor[]>([]);
 
   // Fetch courses list
   useEffect(() => {
@@ -188,6 +198,38 @@ export const EvaluationDashboard: React.FC = () => {
     }
   };
 
+  const handleOpenTrainingReportModal = async () => {
+    if (!isAdmin || !selectedCourse) return;
+    setIsLoadingReportData(true);
+    try {
+      const regQ = query(
+        collection(db, "registrations"),
+        where("courseId", "==", selectedCourse.id)
+      );
+      const [regSnap, instSnap] = await Promise.all([
+        getDocs(regQ),
+        instructors.length > 0
+          ? Promise.resolve(null)
+          : getDocs(collection(db, "instructors")),
+      ]);
+
+      setCourseRegistrations(
+        regSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Registration))
+      );
+      if (instSnap) {
+        setInstructors(
+          instSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Instructor))
+        );
+      }
+      setShowTrainingReportModal(true);
+    } catch (err) {
+      console.error("Error loading registration data for training report:", err);
+      toast.error("ไม่สามารถโหลดรายชื่อผู้เข้าอบรมสำหรับจัดทำรายงานได้");
+    } finally {
+      setIsLoadingReportData(false);
+    }
+  };
+
   return (
     <div className="space-y-8">
       {/* Top Header */}
@@ -247,6 +289,29 @@ export const EvaluationDashboard: React.FC = () => {
                 </>
               )}
             </button>
+
+            {/* Admin-Only Training Report Email Button */}
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={handleOpenTrainingReportModal}
+                disabled={isLoadingReportData}
+                className="flex items-center gap-2 px-5 py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-slate-900/15 disabled:opacity-60 cursor-pointer"
+                title="ส่งรายชื่อผู้เข้าอบรมจริง (CSV) และรายงานสรุปผลประเมิน (PDF) ทางอีเมล"
+              >
+                {isLoadingReportData ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>กำลังโหลดข้อมูล...</span>
+                  </>
+                ) : (
+                  <>
+                    <Mail className="w-4 h-4" />
+                    <span>ส่งรายงานการอบรม</span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -474,6 +539,20 @@ export const EvaluationDashboard: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Admin Training Attendance & Evaluation Report Email Modal */}
+      {isAdmin && selectedCourse && (
+        <TrainingReportEmailModal
+          isOpen={showTrainingReportModal}
+          onClose={() => setShowTrainingReportModal(false)}
+          course={selectedCourse}
+          registrations={courseRegistrations}
+          evaluations={evaluations}
+          instructors={instructors}
+          questions={questions}
+          precomputedAnalysis={analysis}
+        />
       )}
     </div>
   );

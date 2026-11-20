@@ -44,12 +44,14 @@ interface OverviewPdfReportProps {
   course: Course;
   analysis: EvaluationAnalysisResult;
   operationalStats: CourseOperationalStats;
+  containerId?: string;
 }
 
 export const OverviewPdfReport: React.FC<OverviewPdfReportProps> = ({
   course,
   analysis,
-  operationalStats
+  operationalStats,
+  containerId = "overview-pdf-report"
 }) => {
   const currentDateStr = new Date().toLocaleDateString("th-TH", {
     year: "numeric",
@@ -59,7 +61,7 @@ export const OverviewPdfReport: React.FC<OverviewPdfReportProps> = ({
 
   return (
     <div 
-      id="overview-pdf-report" 
+      id={containerId} 
       style={{ 
         width: "794px", 
         color: PDF_COLORS.textPrimary, 

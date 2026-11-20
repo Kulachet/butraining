@@ -145,11 +145,10 @@ async function preloadFonts() {
   }
 }
 
-export async function exportEvaluationPdf(
+export async function generateEvaluationPdfBlob(
   containerId: string,
-  filename: string,
   onProgress?: (msg: string) => void
-): Promise<void> {
+): Promise<Blob> {
   const container = document.getElementById(containerId);
   if (!container) {
     throw new Error("ไม่พบโครงร่างเอกสารสำหรับสร้าง PDF");
@@ -201,9 +200,27 @@ export async function exportEvaluationPdf(
     pdf.addImage(imgData, "JPEG", 0, 0, pdfWidth, pdfHeight, undefined, "FAST");
   }
 
+  return pdf.output("blob");
+}
+
+export async function exportEvaluationPdf(
+  containerId: string,
+  filename: string,
+  onProgress?: (msg: string) => void
+): Promise<void> {
+  const blob = await generateEvaluationPdfBlob(containerId, onProgress);
+
   if (onProgress) {
     onProgress("กำลังดาวน์โหลดไฟล์ PDF...");
   }
 
-  pdf.save(filename);
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.style.visibility = "hidden";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

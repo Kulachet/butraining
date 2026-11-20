@@ -27,6 +27,8 @@ function doPost(e) {
       return handleReminders(data);
     } else if (action === "send_evaluations") {
       return handleEvaluations(data);
+    } else if (action === "send_training_report") {
+      return handleTrainingReport(data);
     } else if (action === "validate_folder") {
       return validateFolder(data.folderId);
     } else {
@@ -433,6 +435,115 @@ function validateFolder(folderId) {
   } catch (e) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error" }))
       .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// 7. ฟังก์ชันส่งรายงานการอบรมพร้อมไฟล์แนบ CSV และ PDF (เฉพาะ Server-to-Server ที่ยืนยัน INTERNAL_WEBHOOK_SECRET)
+function handleTrainingReport(data) {
+  var expectedSecret = PropertiesService.getScriptProperties().getProperty("INTERNAL_WEBHOOK_SECRET");
+  if (!expectedSecret) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "error",
+      code: "GATEWAY_UNCONFIGURED",
+      message: "INTERNAL_WEBHOOK_SECRET is not configured in Apps Script Script Properties."
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (!data.secretToken || data.secretToken !== expectedSecret) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "error",
+      code: "UNAUTHORIZED",
+      message: "Unauthorized: Invalid or missing secret token."
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "error",
+      code: "LOCK_TIMEOUT",
+      message: "Server busy processing another request."
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  try {
+    var recipientEmail = (data.recipientEmail || "").trim().toLowerCase();
+    if (!recipientEmail || !/^[a-z0-9._%+-]+@bu\.ac\.th$/i.test(recipientEmail)) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "error",
+        code: "INVALID_RECIPIENT",
+        message: "Recipient email must be a valid @bu.ac.th address."
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var requestId = (data.requestId || "").trim();
+    if (requestId) {
+      var cached = CacheService.getScriptCache().get("tr_sent_" + requestId);
+      if (cached) {
+        return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
+    var attachmentsInput = data.attachments || {};
+    var csvAtt = attachmentsInput.csv;
+    var pdfAtt = attachmentsInput.pdf;
+    if (!csvAtt || !csvAtt.base64 || !pdfAtt || !pdfAtt.base64) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "error",
+        code: "MISSING_ATTACHMENTS",
+        message: "Both CSV and PDF attachments are required."
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var csvBytes = Utilities.base64Decode(csvAtt.base64);
+    var pdfBytes = Utilities.base64Decode(pdfAtt.base64);
+    if (!csvBytes || csvBytes.length === 0 || !pdfBytes || pdfBytes.length === 0) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "error",
+        code: "EMPTY_ATTACHMENTS",
+        message: "Attachments must not be empty."
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (MailApp.getRemainingDailyQuota() < 1) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "error",
+        code: "QUOTA_EXCEEDED",
+        message: "Daily MailApp quota exceeded."
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var csvBlob = Utilities.newBlob(csvBytes, csvAtt.mimeType || "text/csv", csvAtt.filename || "attendance.csv");
+    var pdfBlob = Utilities.newBlob(pdfBytes, pdfAtt.mimeType || "application/pdf", pdfAtt.filename || "evaluation_overview.pdf");
+
+    var mailOptions = {
+      to: recipientEmail,
+      subject: data.subject || ("[BU Training] ส่งรายชื่อผู้เข้าอบรมจริงและผลประเมิน: " + (data.courseTitle || "")),
+      body: data.body || "",
+      attachments: [csvBlob, pdfBlob],
+      name: data.senderName || "สำนักพัฒนาการเรียนรู้ (LDO) มหาวิทยาลัยกรุงเทพ"
+    };
+    if (data.htmlBody) {
+      mailOptions.htmlBody = data.htmlBody;
+    }
+
+    MailApp.sendEmail(mailOptions);
+
+    var responsePayload = JSON.stringify({
+      status: "success",
+      recipient: recipientEmail,
+      attachmentsCount: 2,
+      sentAt: new Date().toISOString(),
+      requestId: requestId || null
+    });
+
+    if (requestId) {
+      CacheService.getScriptCache().put("tr_sent_" + requestId, responsePayload, 600);
+    }
+
+    return ContentService.createTextOutput(responsePayload).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
   }
 }
 ```
