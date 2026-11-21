@@ -100,6 +100,62 @@
         "role": { "type": "string", "description": "Administrative role identifier" }
       },
       "required": ["email", "active"]
+    },
+    "promotion_campaigns": {
+      "title": "PromotionCampaign",
+      "description": "Course promotional email campaign configuration and aggregate delivery tracking.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "courseId": { "type": "string" },
+        "courseTitle": { "type": "string" },
+        "language": { "type": "string", "enum": ["th", "en"] },
+        "subject": { "type": "string" },
+        "registrationUrl": { "type": "string" },
+        "posterMode": { "type": "string", "enum": ["course_url", "custom_url", "inline_cid", "none"] },
+        "posterUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "ready", "sending", "paused", "completed", "completed_with_issues"] },
+        "totalRecipients": { "type": "integer" },
+        "sentCount": { "type": "integer" },
+        "failedCount": { "type": "integer" },
+        "pendingCount": { "type": "integer" },
+        "unknownCount": { "type": "integer" },
+        "skippedCount": { "type": "integer" },
+        "suppressedCount": { "type": "integer" },
+        "createdByAdminUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["courseId", "language", "subject", "registrationUrl", "status", "totalRecipients", "createdByAdminUid"]
+    },
+    "promotion_campaign_recipients": {
+      "title": "PromotionCampaignRecipient",
+      "description": "Per-recipient delivery state for a promotional campaign.",
+      "type": "object",
+      "properties": {
+        "campaignId": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "name": { "type": "string" },
+        "department": { "type": "string" },
+        "source": { "type": "string", "enum": ["paste", "csv", "instructor"] },
+        "status": { "type": "string", "enum": ["pending", "processing", "sent", "failed", "unknown", "skipped"] },
+        "sentAt": { "type": "string", "format": "date-time" },
+        "error": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["campaignId", "email", "status"]
+    },
+    "promotion_suppressions": {
+      "title": "PromotionSuppression",
+      "description": "Suppressed or opted-out university email addresses excluded from promotional campaigns.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "reason": { "type": "string" },
+        "addedByAdminUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "addedByAdminUid"]
     }
   },
   "firestore": {
@@ -130,6 +186,18 @@
     "/settings/{settingId}": {
       "schema": "settings",
       "description": "Global configuration documents."
+    },
+    "/promotion_campaigns/{campaignId}": {
+      "schema": "promotion_campaigns",
+      "description": "Admin-only promotional email campaigns."
+    },
+    "/promotion_campaigns/{campaignId}/recipients/{recipientId}": {
+      "schema": "promotion_campaign_recipients",
+      "description": "Per-recipient promotional email delivery status documents."
+    },
+    "/promotion_suppressions/{emailKey}": {
+      "schema": "promotion_suppressions",
+      "description": "Admin-managed promotional email suppression list."
     }
   }
 }

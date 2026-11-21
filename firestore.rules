@@ -176,5 +176,59 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isAdmin();
     }
+
+    function isValidPromotionCampaign(data) {
+      return data.keys().hasAll(['courseId', 'language', 'subject', 'registrationUrl', 'status', 'totalRecipients', 'createdByAdminUid']) &&
+             data.courseId is string && data.courseId.size() > 0 && data.courseId.size() <= 128 &&
+             (data.language == 'th' || data.language == 'en') &&
+             data.subject is string && data.subject.size() > 0 && data.subject.size() <= 300 &&
+             data.registrationUrl is string && data.registrationUrl.size() > 0 && data.registrationUrl.size() <= 1000 &&
+             data.status in ['draft', 'ready', 'sending', 'paused', 'completed', 'completed_with_issues'] &&
+             data.totalRecipients is number && data.totalRecipients >= 0 &&
+             data.createdByAdminUid is string && data.createdByAdminUid.size() > 0 && data.createdByAdminUid.size() <= 128;
+    }
+
+    function isValidCampaignRecipient(data, campaignId) {
+      return data.keys().hasAll(['campaignId', 'email', 'status']) &&
+             data.campaignId is string && data.campaignId == campaignId &&
+             data.email is string && data.email.matches("^[a-zA-Z0-9._%+-]+@bu\\.ac\\.th$") &&
+             data.status in ['pending', 'processing', 'sent', 'failed', 'unknown', 'skipped'] &&
+             (!('name' in data) || (data.name is string && data.name.size() <= 200)) &&
+             (!('department' in data) || (data.department is string && data.department.size() <= 200));
+    }
+
+    function isValidSuppressionEntry(data) {
+      return data.keys().hasAll(['email', 'addedByAdminUid']) &&
+             data.email is string && data.email.matches("^[a-zA-Z0-9._%+-]+@bu\\.ac\\.th$") &&
+             data.addedByAdminUid is string && data.addedByAdminUid.size() > 0 && data.addedByAdminUid.size() <= 128 &&
+             (!('reason' in data) || (data.reason is string && data.reason.size() <= 300));
+    }
+
+    match /promotion_campaigns/{campaignId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() &&
+        isValidPromotionCampaign(request.resource.data) &&
+        request.resource.data.createdByAdminUid == request.auth.uid &&
+        exists(/databases/$(database)/documents/courses/$(request.resource.data.courseId));
+      allow update: if isAdmin() &&
+        isValidPromotionCampaign(request.resource.data) &&
+        request.resource.data.createdByAdminUid == resource.data.createdByAdminUid &&
+        request.resource.data.courseId == resource.data.courseId;
+      allow delete: if isAdmin();
+
+      match /recipients/{recipientId} {
+        allow get, list: if isAdmin();
+        allow create, update: if isAdmin() && isValidCampaignRecipient(request.resource.data, campaignId);
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /promotion_suppressions/{emailKey} {
+      allow get, list: if isAdmin();
+      allow create, update: if isAdmin() &&
+        isValidSuppressionEntry(request.resource.data) &&
+        request.resource.data.addedByAdminUid == request.auth.uid;
+      allow delete: if isAdmin();
+    }
   }
 }

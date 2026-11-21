@@ -9,7 +9,7 @@ import { NewInstructorModal } from "../components/NewInstructorModal";
 import { RegistrationService } from "../lib/registrationService";
 import { motion, AnimatePresence } from "motion/react";
 import { Search, Filter, Sparkles, Loader2, X, Clock, MapPin, CheckCircle2, AlertCircle } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { cn, generateGoogleCalendarUrl, formatInstructorName, formatSessionTime, formatSessionName, isMultiDayCourse } from "../lib/utils";
 import { buildRegistrationEmailPayload } from "../lib/registrationEmail";
@@ -28,6 +28,7 @@ interface CancelTarget {
 
 export const LandingPage: React.FC = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { lang, t } = useLanguage();
   const [courses, setCourses] = useState<Course[]>([]);
   const [userRegistrations, setUserRegistrations] = useState<Registration[]>([]);
@@ -44,6 +45,12 @@ export const LandingPage: React.FC = () => {
   // Session Selection State
   const [selectedCourseForSession, setSelectedCourseForSession] = useState<Course | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [highlightedCourseId, setHighlightedCourseId] = useState<string | null>(null);
+
+  const deepLinkedCourseId = React.useMemo(() => {
+    const params = new URLSearchParams(location.search || "");
+    return params.get("course")?.trim() || null;
+  }, [location.search]);
 
   useEffect(() => {
     // Real-time listener for courses
@@ -107,6 +114,20 @@ export const LandingPage: React.FC = () => {
       setShowModal(false);
     }
   }, [user, instructor, loading]);
+
+  useEffect(() => {
+    if (!user || loading || !deepLinkedCourseId || courses.length === 0) return;
+    const exists = courses.some((c) => c.id === deepLinkedCourseId);
+    if (!exists) return;
+    setHighlightedCourseId(deepLinkedCourseId);
+    const timer = setTimeout(() => {
+      const el = document.getElementById(`course-${deepLinkedCourseId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [user, loading, deepLinkedCourseId, courses]);
 
   const handleEvaluate = (courseId: string) => {
     navigate(`/evaluate/${courseId}`);
@@ -446,10 +467,15 @@ export const LandingPage: React.FC = () => {
               ) : (
                 filteredCourses.map((course, index) => (
                   <motion.div
+                    id={`course-${course.id}`}
                     key={course.id}
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: index * 0.1 }}
+                    className={cn(
+                      "rounded-3xl transition-all",
+                      highlightedCourseId === course.id && "ring-2 ring-crimson ring-offset-4 ring-offset-slate-50"
+                    )}
                   >
                     <CourseCard 
                       course={course} 

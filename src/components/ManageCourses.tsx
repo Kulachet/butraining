@@ -19,7 +19,8 @@ import {
   BookOpen,
   RefreshCw,
   Archive,
-  Clock
+  Clock,
+  Megaphone
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { 
@@ -38,9 +39,10 @@ interface Props {
   onCreateCourse: () => void;
   onEditCourse: (course: Course) => void;
   onViewApplicants: (course: Course) => void;
+  onPromoteCourse?: (course: Course) => void;
 }
 
-export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, onViewApplicants }) => {
+export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, onViewApplicants, onPromoteCourse }) => {
   const { user, isAdmin } = useAuth();
   const { lang } = useLanguage();
   const [courses, setCourses] = useState<Course[]>([]);
@@ -632,6 +634,17 @@ export const ManageCourses: React.FC<Props> = ({ onCreateCourse, onEditCourse, o
                   <Edit3 className="w-4 h-4" />
                   Edit Course
                 </button>
+                {isAdmin && onPromoteCourse && (
+                  <button
+                    type="button"
+                    onClick={() => onPromoteCourse(course)}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-[#8b0000]/25 bg-red-50/40 hover:bg-[#8b0000] hover:text-white text-[#8b0000] rounded-xl text-[14px] lg:text-[15px] font-semibold transition-all tracking-wide leading-[1.7]"
+                    title="สร้างและส่งอีเมลประชาสัมพันธ์หลักสูตร"
+                  >
+                    <Megaphone className="w-4 h-4" />
+                    ประชาสัมพันธ์หลักสูตร
+                  </button>
+                )}
                 <button 
                   onClick={() => handleArchiveClick(course)}
                   disabled={actionLoading === course.id}

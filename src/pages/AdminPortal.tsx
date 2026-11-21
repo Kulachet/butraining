@@ -12,6 +12,9 @@ import { RegistrantsList } from "../components/RegistrantsList";
 import { EvaluationDashboard } from "../components/EvaluationDashboard";
 import { EvaluationSettings } from "../components/EvaluationSettings";
 import { TrainingHistory } from "../components/TrainingHistory";
+import { PromotionDashboardTab } from "../components/PromotionDashboardTab";
+import { PromotionCampaignModal, PromotionModalInitialStep } from "../components/PromotionCampaignModal";
+import { PromotionCampaignDoc } from "../lib/promotionCampaign";
 import { 
   Plus, 
   LayoutDashboard, 
@@ -30,7 +33,8 @@ import {
   FileText,
   BarChart3,
   UserCheck,
-  History
+  History,
+  Megaphone
 } from "lucide-react";
 import toast from "react-hot-toast";
 
@@ -64,6 +68,17 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ defaultTab }) => {
   }, [activeTab]);
   const [courses, setCourses] = useState<Course[]>([]);
   const [viewingApplicants, setViewingApplicants] = useState<Course | null>(null);
+  const [promotionRefreshKey, setPromotionRefreshKey] = useState(0);
+  const [promotionModalState, setPromotionModalState] = useState<{
+    isOpen: boolean;
+    course: Course | null;
+    campaign: PromotionCampaignDoc | null;
+    step?: PromotionModalInitialStep;
+  }>({
+    isOpen: false,
+    course: null,
+    campaign: null,
+  });
 
   useEffect(() => {
     const q = query(collection(db, "courses"), orderBy("createdAt", "desc"));
@@ -127,6 +142,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ defaultTab }) => {
             >
               <BookOpen className="w-5 h-5" />
               จัดการหลักสูตร
+            </button>
+            <button 
+              onClick={() => { setActiveTab("promotions"); setViewingApplicants(null); }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-[15px] transition-all tracking-wide ${activeTab === "promotions" && !viewingApplicants ? "bg-slate-50 text-[#333333]" : "text-slate-400 hover:bg-slate-50 hover:text-slate-600"}`}
+            >
+              <Megaphone className="w-5 h-5" />
+              ประชาสัมพันธ์หลักสูตร
             </button>
             <button 
               onClick={() => { setActiveTab("history"); setViewingApplicants(null); }}
@@ -242,6 +264,28 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ defaultTab }) => {
                   onCreateCourse={() => navigate("/admin/course/new")}
                   onEditCourse={(course) => navigate(`/admin/course/edit/${course.id}`)}
                   onViewApplicants={(course) => setViewingApplicants(course)}
+                  onPromoteCourse={(course) =>
+                    setPromotionModalState({
+                      isOpen: true,
+                      course,
+                      campaign: null,
+                      step: 2,
+                    })
+                  }
+                />
+              )}
+
+              {activeTab === "promotions" && (
+                <PromotionDashboardTab
+                  refreshTrigger={promotionRefreshKey}
+                  onOpenCampaignModal={({ course, campaign, step }) =>
+                    setPromotionModalState({
+                      isOpen: true,
+                      course: course || null,
+                      campaign: campaign || null,
+                      step,
+                    })
+                  }
                 />
               )}
 
@@ -290,6 +334,21 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ defaultTab }) => {
             </>
           )}
         </main>
+
+        <PromotionCampaignModal
+          isOpen={promotionModalState.isOpen}
+          onClose={() =>
+            setPromotionModalState({
+              isOpen: false,
+              course: null,
+              campaign: null,
+            })
+          }
+          initialCourse={promotionModalState.course}
+          existingCampaign={promotionModalState.campaign}
+          initialStep={promotionModalState.step}
+          onCampaignUpdated={() => setPromotionRefreshKey((k) => k + 1)}
+        />
       </div>
     </PinGate>
   );
