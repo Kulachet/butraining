@@ -7,8 +7,10 @@ import {
   buildCampaignRecipientDocId,
   buildCampaignRegistrationLink,
   buildSuppressionDocId,
+  deletePromotionCampaign,
   deriveInitialPosterFromCourse,
   dispatchPromotionBatch,
+  evaluateCampaignDeletionEligibility,
   fetchPromotionQuota,
   generateCampaignResultsCsv,
   getDefaultPromotionTemplate,
@@ -419,12 +421,15 @@ async function main() {
     campaigns?: Record<string, any>;
     recipientsByCampaign?: Record<string, Record<string, any>>;
     suppressions?: Record<string, any>;
+    failOnBatchCommitNumber?: number;
   }) {
+    let commitCallCount = 0;
     const store = {
       courses: structuredClone(seed.courses || {}),
       promotion_campaigns: structuredClone(seed.campaigns || {}),
       recipientsByCampaign: structuredClone(seed.recipientsByCampaign || {}),
       promotion_suppressions: structuredClone(seed.suppressions || {}),
+      deleteOrder: [] as string[],
     };
 
     const makeDocRef = (colPath: string, docId: string, parentCampaignId?: string): any => ({
@@ -449,6 +454,17 @@ async function main() {
         if (!map?.[docId]) throw new Error(`Doc not found: ${colPath}/${docId}`);
         map[docId] = { ...map[docId], ...structuredClone(patch) };
       },
+      async delete() {
+        const map = parentCampaignId
+          ? (store.recipientsByCampaign[parentCampaignId] ||= {})
+          : (store as any)[colPath];
+        if (map && Object.prototype.hasOwnProperty.call(map, docId)) {
+          delete map[docId];
+          store.deleteOrder.push(
+            parentCampaignId ? `recipients/${parentCampaignId}/${docId}` : `${colPath}/${docId}`
+          );
+        }
+      },
     });
 
     const makeCollection = (colPath: string, parentCampaignId?: string): any => {
@@ -459,6 +475,22 @@ async function main() {
 
       return {
         doc: (docId: string) => makeDocRef(colPath, docId, parentCampaignId),
+        limit(n: number) {
+          return {
+            async get() {
+              const map = getMap();
+              const docs = Object.entries(map)
+                .slice(0, n)
+                .map(([id, data]) => ({
+                  id,
+                  exists: true,
+                  data: () => structuredClone(data),
+                  ref: makeDocRef(colPath, id, parentCampaignId),
+                }));
+              return { empty: docs.length === 0, docs };
+            },
+          };
+        },
         async get() {
           const map = getMap();
           const docs = Object.entries(map).map(([id, data]) => ({
@@ -514,14 +546,25 @@ async function main() {
         return makeCollection(name);
       },
       batch() {
-        const ops: Array<{ ref: any; patch: Record<string, any> }> = [];
+        const ops: Array<{ type: "update" | "delete"; ref: any; patch?: Record<string, any> }> = [];
         return {
           update(ref: any, patch: Record<string, any>) {
-            ops.push({ ref, patch });
+            ops.push({ type: "update", ref, patch });
+          },
+          delete(ref: any) {
+            ops.push({ type: "delete", ref });
           },
           async commit() {
+            commitCallCount++;
+            if (seed.failOnBatchCommitNumber && commitCallCount === seed.failOnBatchCommitNumber) {
+              throw new Error(`Simulated batch failure on commit #${commitCallCount}`);
+            }
             for (const op of ops) {
-              await op.ref.update(op.patch);
+              if (op.type === "delete") {
+                await op.ref.delete();
+              } else {
+                await op.ref.update(op.patch);
+              }
             }
           },
         };
@@ -532,7 +575,6 @@ async function main() {
             return await target.get();
           },
           update(ref: any, patch: Record<string, any>) {
-            // Queue or apply update directly since single-process mock
             opsQueue.push(() => ref.update(patch));
           },
         };
@@ -981,6 +1023,315 @@ async function main() {
     assert.ok(capturedHtml.includes('<tr><td align="left" style="text-align:left;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;width:100%;margin:0;'));
     assert.ok(capturedHtml.includes('href="https://butraining.netlify.app/"'));
     assert.ok(!capturedHtml.includes("#/?course="));
+  });
+
+  // 21. Client & shared deletion eligibility rules (draft/ready/clean paused allowed; completed/sending/sent/unknown/processing/locked blocked)
+  await runTest("21. evaluateCampaignDeletionEligibility enforces exact allowed/blocked states", () => {
+    assert.equal(evaluateCampaignDeletionEligibility({ status: "draft", sentCount: 0, unknownCount: 0 }).allowed, true);
+    assert.equal(evaluateCampaignDeletionEligibility({ status: "ready", sentCount: 0, unknownCount: 0 }).allowed, true);
+    assert.equal(
+      evaluateCampaignDeletionEligibility(
+        { status: "paused", sentCount: 0, unknownCount: 0, activeLockUntil: "" },
+        [{ status: "pending" }, { status: "failed" }]
+      ).allowed,
+      true
+    );
+
+    assert.equal(evaluateCampaignDeletionEligibility({ status: "completed", sentCount: 10, unknownCount: 0 }).allowed, false);
+    assert.equal(evaluateCampaignDeletionEligibility({ status: "completed_with_issues", sentCount: 10, unknownCount: 1 }).allowed, false);
+    assert.equal(evaluateCampaignDeletionEligibility({ status: "sending", sentCount: 0, unknownCount: 0 }).allowed, false);
+    assert.equal(evaluateCampaignDeletionEligibility({ status: "paused", sentCount: 1, unknownCount: 0 }).allowed, false);
+    assert.equal(evaluateCampaignDeletionEligibility({ status: "paused", sentCount: 0, unknownCount: 1 }).allowed, false);
+    assert.equal(
+      evaluateCampaignDeletionEligibility({
+        status: "paused",
+        sentCount: 0,
+        unknownCount: 0,
+        activeLockUntil: new Date(Date.now() + 20_000).toISOString(),
+      }).allowed,
+      false
+    );
+    assert.equal(
+      evaluateCampaignDeletionEligibility(
+        { status: "paused", sentCount: 0, unknownCount: 0 },
+        [{ status: "processing" }]
+      ).allowed,
+      false
+    );
+  });
+
+  // 22. Server delete_campaign deletes draft campaigns and ready campaigns (including >380 recipients in chunked batches BEFORE parent delete) and leaves unrelated collections untouched
+  await runTest("22. Safe delete removes draft and ready (>380 pending recipients) in batches before parent without touching courses, suppressions, or completed campaigns", async () => {
+    const bulkRecipients: Record<string, any> = {};
+    for (let i = 0; i < 410; i++) {
+      bulkRecipients[`rec_${i}`] = { email: `staff${i}@bu.ac.th`, status: "pending", attempts: 0 };
+    }
+
+    const db = createMockAdminDb({
+      courses: { "c-preserve": { title: "Important Course", language: "th" } },
+      suppressions: { "sup-1": { email: "optout@bu.ac.th" } },
+      campaigns: {
+        "camp-draft": { id: "camp-draft", courseId: "c-preserve", status: "draft", sentCount: 0, unknownCount: 0, totalRecipients: 0 },
+        "camp-ready-410": { id: "camp-ready-410", courseId: "c-preserve", status: "ready", sentCount: 0, unknownCount: 0, totalRecipients: 410 },
+        "camp-completed-hist": { id: "camp-completed-hist", courseId: "c-preserve", status: "completed", sentCount: 5, unknownCount: 0, totalRecipients: 5 },
+      },
+      recipientsByCampaign: {
+        "camp-draft": {},
+        "camp-ready-410": bulkRecipients,
+        "camp-completed-hist": { "rec-done": { email: "done@bu.ac.th", status: "sent" } },
+      },
+    });
+
+    const deps = {
+      db,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      // Explicitly omit GAS env to confirm deletion does not require GAS configuration!
+      gasUrl: "",
+      gasSecret: "",
+      skipRateLimit: true,
+    };
+
+    // Delete draft
+    const draftRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-admin-token" },
+        body: JSON.stringify({ action: "delete_campaign", campaignId: "camp-draft", adminConfirmed: true }),
+      },
+      deps
+    );
+    assert.equal(draftRes.statusCode, 200);
+    assert.equal(db.store.promotion_campaigns["camp-draft"], undefined);
+
+    // Delete ready with 410 pending recipients
+    const readyRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-admin-token" },
+        body: JSON.stringify({ action: "delete_campaign", campaignId: "camp-ready-410", adminConfirmed: true }),
+      },
+      deps
+    );
+    assert.equal(readyRes.statusCode, 200);
+    const readyBody = JSON.parse(readyRes.body);
+    assert.equal(readyBody.deletedRecipientsCount, 410);
+    assert.equal(db.store.promotion_campaigns["camp-ready-410"], undefined);
+    assert.equal(Object.keys(db.store.recipientsByCampaign["camp-ready-410"] || {}).length, 0);
+
+    // Parent campaign doc MUST be deleted AFTER all recipient docs!
+    const parentDeleteIdx = db.store.deleteOrder.indexOf("promotion_campaigns/camp-ready-410");
+    const lastRecipientIdx = db.store.deleteOrder.reduce(
+      (max, entry, idx) => (entry.startsWith("recipients/camp-ready-410/") ? idx : max),
+      -1
+    );
+    assert.ok(parentDeleteIdx > lastRecipientIdx, "Parent campaign document must be deleted only after all recipient batches");
+
+    // Verify preserved records untouched
+    assert.ok(db.store.courses["c-preserve"]);
+    assert.ok(db.store.promotion_suppressions["sup-1"]);
+    assert.ok(db.store.promotion_campaigns["camp-completed-hist"]);
+    assert.ok(db.store.recipientsByCampaign["camp-completed-hist"]["rec-done"]);
+  });
+
+  // 23. Blocked deletions: completed, unknown recipients, sending, stale-count paused with hidden sent/processing, and missing confirmation
+  await runTest("23. Blocks deletion of completed, unknown-containing, sending, locked, and hidden-sent/processing campaigns", async () => {
+    const db = createMockAdminDb({
+      courses: { "c1": { title: "Course 1" } },
+      campaigns: {
+        "camp-completed": { id: "camp-completed", courseId: "c1", status: "completed", sentCount: 2, unknownCount: 0 },
+        "camp-sending": { id: "camp-sending", courseId: "c1", status: "sending", sentCount: 0, unknownCount: 0 },
+        "camp-paused-unknown": { id: "camp-paused-unknown", courseId: "c1", status: "paused", sentCount: 0, unknownCount: 1 },
+        // Stale counters on parent doc (=0) while subcollection actually holds an unknown/sent/processing doc!
+        "camp-stale-hidden-unknown": { id: "camp-stale-hidden-unknown", courseId: "c1", status: "paused", sentCount: 0, unknownCount: 0 },
+        "camp-stale-hidden-processing": { id: "camp-stale-hidden-processing", courseId: "c1", status: "paused", sentCount: 0, unknownCount: 0 },
+      },
+      recipientsByCampaign: {
+        "camp-completed": { "r1": { status: "sent" } },
+        "camp-sending": { "r2": { status: "pending" } },
+        "camp-paused-unknown": { "r3": { status: "unknown" }, "r4": { status: "pending" } },
+        "camp-stale-hidden-unknown": { "r5": { status: "unknown" }, "r6": { status: "pending" } },
+        "camp-stale-hidden-processing": { "r7": { status: "processing" }, "r8": { status: "pending" } },
+      },
+    });
+
+    const deps = {
+      db,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      skipRateLimit: true,
+    };
+
+    // Missing adminConfirmed
+    const noConfirmRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-admin" },
+        body: JSON.stringify({ action: "delete_campaign", campaignId: "camp-completed", adminConfirmed: false }),
+      },
+      deps
+    );
+    assert.equal(noConfirmRes.statusCode, 400);
+    assert.equal(JSON.parse(noConfirmRes.body).code, "CONFIRMATION_REQUIRED");
+
+    for (const [cid, expectedCode] of [
+      ["camp-completed", "CAMPAIGN_COMPLETED_PROTECTED"],
+      ["camp-sending", "CAMPAIGN_SENDING"],
+      ["camp-paused-unknown", "CAMPAIGN_HAS_UNKNOWN"],
+      ["camp-stale-hidden-unknown", "CAMPAIGN_HAS_UNKNOWN"],
+      ["camp-stale-hidden-processing", "CAMPAIGN_HAS_PROCESSING"],
+    ] as const) {
+      const blockedRes = await handlePromotionWithDeps(
+        {
+          httpMethod: "POST",
+          path: "/api/send-course-promotion",
+          headers: { authorization: "Bearer valid-admin" },
+          body: JSON.stringify({ action: "delete_campaign", campaignId: cid, adminConfirmed: true }),
+        },
+        deps
+      );
+      assert.equal(blockedRes.statusCode, 409, `Expected 409 for ${cid}`);
+      assert.equal(JSON.parse(blockedRes.body).code, expectedCode);
+      assert.ok(db.store.promotion_campaigns[cid], `${cid} must remain intact`);
+      // Lock must never remain stuck after blocking
+      assert.equal(db.store.promotion_campaigns[cid].activeLockUntil || "", "");
+    }
+  });
+
+  // 24. Non-admin / unauthenticated deletion attempts denied server-side
+  await runTest("24. Non-admin and unauthenticated delete attempts are denied", async () => {
+    const db = createMockAdminDb({
+      campaigns: { "camp-draft": { id: "camp-draft", status: "draft", sentCount: 0, unknownCount: 0 } },
+    });
+
+    const noAuth = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: {},
+        body: JSON.stringify({ action: "delete_campaign", campaignId: "camp-draft", adminConfirmed: true }),
+      },
+      { db, skipRateLimit: true }
+    );
+    assert.equal(noAuth.statusCode, 401);
+
+    const nonAdmin = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer user-token" },
+        body: JSON.stringify({ action: "delete_campaign", campaignId: "camp-draft", adminConfirmed: true }),
+      },
+      {
+        db,
+        verifyIdToken: async () => ({ uid: "user-99", email: "regular.user@bu.ac.th", email_verified: true }),
+        verifyAdmin: async () => false,
+        skipRateLimit: true,
+      }
+    );
+    assert.equal(nonAdmin.statusCode, 403);
+    assert.equal(JSON.parse(nonAdmin.body).code, "FORBIDDEN");
+    assert.ok(db.store.promotion_campaigns["camp-draft"], "Campaign must not be deleted by non-admin");
+  });
+
+  // 25. Partial failure recovery: batch #2 fails after batch #1 deletes 380 recipients -> preserves parent, unlocks, recounts, allows retry
+  await runTest("25. Partial batch delete failure preserves parent, releases lock, recalculates counts, and supports safe retry", async () => {
+    const bulkRecipients: Record<string, any> = {};
+    for (let i = 0; i < 410; i++) {
+      bulkRecipients[`rec_${i}`] = { email: `staff${i}@bu.ac.th`, status: "pending", attempts: 0 };
+    }
+
+    const db = createMockAdminDb({
+      campaigns: {
+        "camp-partial": { id: "camp-partial", courseId: "c1", status: "ready", sentCount: 0, unknownCount: 0, totalRecipients: 410 },
+      },
+      recipientsByCampaign: { "camp-partial": bulkRecipients },
+      failOnBatchCommitNumber: 2, // Commit #1 succeeds (380 deleted), Commit #2 fails (30 remain)
+    });
+
+    const deps = {
+      db,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      skipRateLimit: true,
+    };
+
+    const failRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer admin-token" },
+        body: JSON.stringify({ action: "delete_campaign", campaignId: "camp-partial", adminConfirmed: true }),
+      },
+      deps
+    );
+
+    assert.equal(failRes.statusCode, 500);
+    const failBody = JSON.parse(failRes.body);
+    assert.equal(failBody.code, "DELETE_PARTIAL_FAILURE");
+    assert.equal(failBody.partialFailure, true);
+    assert.equal(failBody.deletedRecipientsCount, 380);
+    assert.equal(failBody.remainingRecipientsCount, 30);
+    assert.ok(db.store.promotion_campaigns["camp-partial"], "Parent doc must stay intact while remaining recipients exist");
+    assert.equal(db.store.promotion_campaigns["camp-partial"].activeLockUntil, "");
+    assert.equal(db.store.promotion_campaigns["camp-partial"].totalRecipients, 30);
+
+    // Safe retry cleanup completes remaining 30 recipients + deletes parent doc
+    const retryRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer admin-token" },
+        body: JSON.stringify({ action: "delete_campaign", campaignId: "camp-partial", adminConfirmed: true }),
+      },
+      deps
+    );
+    assert.equal(retryRes.statusCode, 200);
+    assert.equal(JSON.parse(retryRes.body).deletedRecipientsCount, 30);
+    assert.equal(db.store.promotion_campaigns["camp-partial"], undefined);
+  });
+
+  // 26. Client deletePromotionCampaign wrapper surfaces partialFailure & blocked codes cleanly
+  await runTest("26. Client deletePromotionCampaign wrapper enforces adminConfirmed and parses partial/blocked errors", async () => {
+    const noConfirm = await deletePromotionCampaign({
+      idToken: "token",
+      campaignId: "c1",
+      adminConfirmed: false,
+    });
+    assert.equal(noConfirm.ok, false);
+    assert.equal(noConfirm.code, "CONFIRMATION_REQUIRED");
+
+    const partialClientRes = await deletePromotionCampaign({
+      idToken: "token",
+      campaignId: "c1",
+      adminConfirmed: true,
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            status: "error",
+            code: "DELETE_PARTIAL_FAILURE",
+            partialFailure: true,
+            deletedRecipientsCount: 380,
+            remainingRecipientsCount: 30,
+            message: "Partial delete error",
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        )) as typeof fetch,
+    });
+    assert.equal(partialClientRes.ok, false);
+    assert.equal(partialClientRes.partialFailure, true);
+    assert.equal(partialClientRes.deletedRecipientsCount, 380);
+    assert.equal(partialClientRes.remainingRecipientsCount, 30);
+  });
+
+  // 27. Hardened firestore.rules guard delete operations on promotion_campaigns and recipients
+  await runTest("27. firestore.rules restricts promotion campaign deletes to clean draft/ready/paused campaigns", () => {
+    const rules = fs.readFileSync(path.join(ROOT_DIR, "firestore.rules"), "utf8");
+    assert.ok(rules.includes("resource.data.status in ['draft', 'ready', 'paused']"));
+    assert.ok(rules.includes("!(resource.data.status in ['sent', 'unknown', 'processing'])"));
   });
 
   console.log(`\n=== All ${passed} Module 22 Offline Tests Passed ===`);

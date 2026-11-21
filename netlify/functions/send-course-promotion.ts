@@ -681,6 +681,275 @@ export async function handlePromotionWithDeps(
   }
 
   const action = String(bodyData.action || "").trim();
+
+  // --- ACTION 0: SAFE ADMIN CAMPAIGN DELETE (DOES NOT REQUIRE GAS ENV) ---
+  if (action === "delete_campaign") {
+    const campaignId = sanitizeHeaderString(bodyData.campaignId, 128);
+    if (!campaignId || campaignId.includes("/") || campaignId.includes("..")) {
+      return {
+        statusCode: 400,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          status: "error",
+          code: "MISSING_CAMPAIGN_ID",
+          message: "Valid campaignId is required",
+        }),
+      };
+    }
+
+    if (bodyData.adminConfirmed !== true) {
+      return {
+        statusCode: 400,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          status: "error",
+          code: "CONFIRMATION_REQUIRED",
+          message: "Explicit Admin confirmation (adminConfirmed=true) is required before deleting a campaign.",
+        }),
+      };
+    }
+
+    const evaluateDeletionAllowed = (
+      cData: Record<string, any>,
+      recipientDocs?: Array<{ status?: unknown }>,
+      options?: { ignoreLock?: boolean }
+    ): { allowed: boolean; code?: string; reason?: string } => {
+      const cStatus = String(cData.status || "").trim();
+      if (cStatus === "completed" || cStatus === "completed_with_issues") {
+        return {
+          allowed: false,
+          code: "CAMPAIGN_COMPLETED_PROTECTED",
+          reason: "แคมเปญที่ส่งเสร็จสิ้นแล้วถูกเก็บรักษาเป็นประวัติการส่ง ไม่สามารถลบได้",
+        };
+      }
+      if (cStatus === "sending") {
+        return {
+          allowed: false,
+          code: "CAMPAIGN_SENDING",
+          reason: "แคมเปญกำลังอยู่ระหว่างการจัดส่ง (sending) ไม่สามารถลบได้",
+        };
+      }
+      if (cStatus !== "draft" && cStatus !== "ready" && cStatus !== "paused") {
+        return {
+          allowed: false,
+          code: "CAMPAIGN_STATUS_BLOCKED",
+          reason: `สถานะแคมเปญ (${cStatus || "unknown"}) ไม่อนุญาตให้ลบ`,
+        };
+      }
+      if (!options?.ignoreLock) {
+        const lockUntilMs = cData.activeLockUntil ? new Date(cData.activeLockUntil).getTime() : 0;
+        if (Number.isFinite(lockUntilMs) && lockUntilMs > Date.now()) {
+          return {
+            allowed: false,
+            code: "CAMPAIGN_LOCKED",
+            reason: "แคมเปญมี Lock การประมวลผลค้างอยู่ชั่วคราว กรุณารอให้การทำงานเสร็จสิ้นก่อน",
+          };
+        }
+      }
+      const hasSentDoc = Array.isArray(recipientDocs) && recipientDocs.some((r) => String(r.status || "") === "sent");
+      if ((Number(cData.sentCount) || 0) > 0 || hasSentDoc) {
+        return {
+          allowed: false,
+          code: "CAMPAIGN_HAS_SENT",
+          reason: "แคมเปญนี้มีรายชื่อที่ส่งอีเมลแล้ว จึงถูกเก็บรักษาเป็นประวัติและไม่สามารถลบได้",
+        };
+      }
+      const hasUnknownDoc =
+        Array.isArray(recipientDocs) && recipientDocs.some((r) => String(r.status || "") === "unknown");
+      if ((Number(cData.unknownCount) || 0) > 0 || hasUnknownDoc) {
+        return {
+          allowed: false,
+          code: "CAMPAIGN_HAS_UNKNOWN",
+          reason: "แคมเปญนี้มีรายชื่อสถานะ Unknown ที่ต้องตรวจสอบก่อน จึงไม่สามารถลบได้",
+        };
+      }
+      const hasProcessingDoc =
+        Array.isArray(recipientDocs) && recipientDocs.some((r) => String(r.status || "") === "processing");
+      if (hasProcessingDoc) {
+        return {
+          allowed: false,
+          code: "CAMPAIGN_HAS_PROCESSING",
+          reason: "มีรายชื่อผู้รับกำลังอยู่ในสถานะ Processing ไม่สามารถลบได้",
+        };
+      }
+      return { allowed: true };
+    };
+
+    const campaignRef = fb.db.collection("promotion_campaigns").doc(campaignId);
+    const recipientsColl = campaignRef.collection("recipients");
+
+    let txOutcome: { ok: boolean; statusCode?: number; code?: string; message?: string; cData?: Record<string, any> };
+    try {
+      txOutcome = await fb.db.runTransaction(async (tx: any) => {
+        const cSnap = await tx.get(campaignRef);
+        if (!cSnap.exists) {
+          return {
+            ok: false,
+            statusCode: 404,
+            code: "CAMPAIGN_NOT_FOUND",
+            message: "ไม่พบแคมเปญที่ต้องการลบในฐานข้อมูล (อาจถูกลบไปแล้ว)",
+          };
+        }
+        const cData = cSnap.data() || {};
+        const preCheck = evaluateDeletionAllowed(cData);
+        if (!preCheck.allowed) {
+          return {
+            ok: false,
+            statusCode: 409,
+            code: preCheck.code,
+            message: preCheck.reason,
+          };
+        }
+        const nowIso = new Date().toISOString();
+        const lockUntil = new Date(Date.now() + 30_000).toISOString();
+        tx.update(campaignRef, {
+          activeLockUntil: lockUntil,
+          updatedAt: nowIso,
+        });
+        return { ok: true, cData };
+      });
+    } catch (err: any) {
+      return {
+        statusCode: 500,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          status: "error",
+          code: "DELETE_PRECHECK_FAILED",
+          message: err?.message || "ไม่สามารถตรวจสอบสถานะแคมเปญก่อนลบได้",
+        }),
+      };
+    }
+
+    if (!txOutcome.ok) {
+      return {
+        statusCode: txOutcome.statusCode || 409,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          status: "error",
+          code: txOutcome.code || "CAMPAIGN_DELETE_BLOCKED",
+          message: txOutcome.message || "ไม่สามารถลบแคมเปญได้",
+        }),
+      };
+    }
+
+    let deletedRecipientsCount = 0;
+    try {
+      const recipientsSnap = await recipientsColl.get();
+      const recipientDocsData = recipientsSnap.docs.map((d: any) => d.data() || {});
+      const deepCheck = evaluateDeletionAllowed(txOutcome.cData || {}, recipientDocsData, { ignoreLock: true });
+
+      if (!deepCheck.allowed) {
+        // Release lock & sync accurate counts from subcollection so UI stays truthful
+        let sentCount = 0;
+        let failedCount = 0;
+        let pendingCount = 0;
+        let unknownCount = 0;
+        let skippedCount = 0;
+        recipientDocsData.forEach((r: any) => {
+          const s = String(r?.status || "pending");
+          if (s === "sent") sentCount++;
+          else if (s === "failed") failedCount++;
+          else if (s === "unknown" || s === "processing") unknownCount++;
+          else if (s === "skipped") skippedCount++;
+          else pendingCount++;
+        });
+        await campaignRef.update({
+          activeLockUntil: "",
+          totalRecipients: recipientDocsData.length,
+          sentCount,
+          failedCount,
+          pendingCount,
+          unknownCount,
+          skippedCount,
+          updatedAt: new Date().toISOString(),
+        });
+        return {
+          statusCode: 409,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({
+            status: "error",
+            code: deepCheck.code,
+            message: deepCheck.reason,
+          }),
+        };
+      }
+
+      // Delete all subcollection recipient documents in safe chunks BEFORE deleting parent doc
+      const CHUNK_SIZE = 380;
+      for (let i = 0; i < recipientsSnap.docs.length; i += CHUNK_SIZE) {
+        const slice = recipientsSnap.docs.slice(i, i + CHUNK_SIZE);
+        const delBatch = fb.db.batch();
+        for (const rDoc of slice) {
+          delBatch.delete(rDoc.ref);
+        }
+        await delBatch.commit();
+        deletedRecipientsCount += slice.length;
+      }
+
+      // Double-check subcollection is empty before deleting parent campaign document
+      const leftoverSnap = await recipientsColl.limit(1).get();
+      if (!leftoverSnap.empty) {
+        throw new Error("Recipient subcollection still contains documents after batch cleanup");
+      }
+
+      await campaignRef.delete();
+
+      return {
+        statusCode: 200,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          status: "success",
+          campaignId,
+          deletedRecipientsCount,
+          message: `ลบแคมเปญ และรายชื่อผู้รับ ${deletedRecipientsCount} รายการเรียบร้อยแล้ว`,
+        }),
+      };
+    } catch (err: any) {
+      // Partial failure recovery: release lock & recalculate remaining counts on parent doc
+      let remainingRecipientsCount: number | undefined;
+      try {
+        const remainingSnap = await recipientsColl.get();
+        remainingRecipientsCount = remainingSnap.docs.length;
+        let failedCount = 0;
+        let pendingCount = 0;
+        let skippedCount = 0;
+        remainingSnap.docs.forEach((d: any) => {
+          const s = String(d.data()?.status || "pending");
+          if (s === "failed") failedCount++;
+          else if (s === "skipped") skippedCount++;
+          else pendingCount++;
+        });
+        await campaignRef.update({
+          activeLockUntil: "",
+          totalRecipients: remainingRecipientsCount,
+          failedCount,
+          pendingCount,
+          skippedCount,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (rescueErr) {
+        console.error("[send-course-promotion] Delete rescue lock release failed:", rescueErr);
+      }
+
+      return {
+        statusCode: 500,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          status: "error",
+          code: "DELETE_PARTIAL_FAILURE",
+          partialFailure: true,
+          campaignId,
+          deletedRecipientsCount,
+          remainingRecipientsCount,
+          message:
+            `การลบแคมเปญขัดข้องกลางทาง (${err?.message || "Batch delete error"}) — ลบผู้รับไปแล้ว ${deletedRecipientsCount} รายการ` +
+            (typeof remainingRecipientsCount === "number" ? ` คงเหลือ ${remainingRecipientsCount} รายการ` : "") +
+            " สามารถกดลองลบอีกครั้งได้อย่างปลอดภัย",
+        }),
+      };
+    }
+  }
+
   const gasUrl = (deps?.gasUrl ?? process.env.GAS_PROMOTION_URL ?? "").trim();
   const gasSecret = (deps?.gasSecret ?? process.env.GAS_PROMOTION_SECRET ?? "").trim();
   const fetchFn = deps?.fetchFn || fetch;

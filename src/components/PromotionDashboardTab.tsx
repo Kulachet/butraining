@@ -4,6 +4,8 @@ import { auth, db } from "../lib/firebase";
 import { Course } from "../types";
 import { useAuth } from "./AuthProvider";
 import {
+  deletePromotionCampaign,
+  evaluateCampaignDeletionEligibility,
   fetchPromotionQuota,
   generateCampaignResultsCsv,
   isAuthorizedUniversityEmail,
@@ -13,6 +15,7 @@ import {
 } from "../lib/promotionCampaign";
 import {
   addSuppressionEntry,
+  getPromotionCampaign,
   listCampaignRecipients,
   listPromotionCampaigns,
   listSuppressionList,
@@ -32,6 +35,7 @@ import {
   Search,
   ShieldAlert,
   Trash2,
+  X,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
@@ -65,6 +69,16 @@ export const PromotionDashboardTab: React.FC<PromotionDashboardTabProps> = ({
   const [newSuppressReason, setNewSuppressReason] = useState("");
   const [savingSuppression, setSavingSuppression] = useState(false);
   const [showSuppressionPanel, setShowSuppressionPanel] = useState(false);
+
+  // Safe Delete Campaign modal state
+  const [checkingDeleteId, setCheckingDeleteId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<PromotionCampaignDoc | null>(null);
+  const [deleteAdminConfirmed, setDeleteAdminConfirmed] = useState(false);
+  const [isDeletingCampaign, setIsDeletingCampaign] = useState(false);
+  const [deleteError, setDeleteError] = useState<{
+    message: string;
+    partialRetryable: boolean;
+  } | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -171,6 +185,105 @@ export const PromotionDashboardTab: React.FC<PromotionDashboardTabProps> = ({
       toast.success(`นำ ${entry.email} ออกจาก Suppression List แล้ว`);
     } catch {
       toast.error("ไม่สามารถลบรายชื่อออกจาก Suppression List ได้");
+    }
+  };
+
+  const handleRequestDeleteCampaign = async (camp: PromotionCampaignDoc) => {
+    const quickEligibility = evaluateCampaignDeletionEligibility(camp);
+    if (!quickEligibility.allowed) {
+      toast.error(quickEligibility.reason || "ไม่สามารถลบแคมเปญนี้ได้");
+      return;
+    }
+
+    setCheckingDeleteId(camp.id);
+    try {
+      const [freshCamp, freshRecipients] = await Promise.all([
+        getPromotionCampaign(camp.id),
+        listCampaignRecipients(camp.id),
+      ]);
+
+      if (!freshCamp) {
+        toast("ไม่พบแคมเปญนี้ในฐานข้อมูล (อาจถูกลบไปแล้ว)", { icon: "ℹ️" });
+        await loadData();
+        return;
+      }
+
+      const liveEligibility = evaluateCampaignDeletionEligibility(freshCamp, freshRecipients);
+      if (!liveEligibility.allowed) {
+        toast.error(liveEligibility.reason || "สถานะล่าสุดของแคมเปญไม่อนุญาตให้ลบ");
+        await loadData();
+        return;
+      }
+
+      setDeleteTarget(freshCamp);
+      setDeleteAdminConfirmed(false);
+      setDeleteError(null);
+    } catch (err: any) {
+      toast.error(err?.message || "ไม่สามารถตรวจสอบสถานะล่าสุดของแคมเปญก่อนลบได้");
+    } finally {
+      setCheckingDeleteId(null);
+    }
+  };
+
+  const handleConfirmDeleteCampaign = async () => {
+    if (!deleteTarget) return;
+    if (!deleteAdminConfirmed) {
+      toast.error("กรุณาติ๊กยืนยันความเข้าใจว่าไม่สามารถย้อนกลับการลบได้");
+      return;
+    }
+    const curUser = auth.currentUser;
+    if (!curUser) {
+      toast.error("กรุณาเข้าสู่ระบบผู้ดูแลระบบใหม่อีกครั้ง");
+      return;
+    }
+
+    setIsDeletingCampaign(true);
+    setDeleteError(null);
+    try {
+      const idToken = await curUser.getIdToken();
+      const res = await deletePromotionCampaign({
+        idToken,
+        campaignId: deleteTarget.id,
+        adminConfirmed: true,
+      });
+
+      if (res.ok) {
+        setDeleteTarget(null);
+        setDeleteAdminConfirmed(false);
+        setDeleteError(null);
+        await loadData();
+        toast.success(res.message || "ลบแคมเปญและรายชื่อผู้รับเรียบร้อยแล้ว");
+      } else {
+        const tag =
+          res.httpStatus || res.code
+            ? `[${res.httpStatus ? `HTTP ${res.httpStatus}` : ""}${res.httpStatus && res.code ? " · " : ""}${res.code || ""}] `
+            : "";
+        const errMessage = `${tag}${res.message}`;
+        const partialRetryable = Boolean(
+          res.partialFailure || res.httpStatus === 500 || res.code === "DELETE_PARTIAL_FAILURE" || res.code === "NETWORK_ERROR"
+        );
+        setDeleteError({
+          message: errMessage,
+          partialRetryable,
+        });
+
+        // Refresh dashboard and keep modal synced with latest Firestore counts for safe recovery
+        await loadData();
+        const refreshedTarget = await getPromotionCampaign(deleteTarget.id).catch(() => null);
+        if (refreshedTarget) {
+          setDeleteTarget(refreshedTarget);
+        }
+        toast.error(errMessage, { duration: 6000 });
+      }
+    } catch (err: any) {
+      const errMessage = err?.message || "เกิดข้อผิดพลาดระหว่างการลบแคมเปญ";
+      setDeleteError({
+        message: errMessage,
+        partialRetryable: true,
+      });
+      toast.error(errMessage);
+    } finally {
+      setIsDeletingCampaign(false);
     }
   };
 
@@ -382,6 +495,8 @@ export const PromotionDashboardTab: React.FC<PromotionDashboardTabProps> = ({
           <div className="divide-y divide-slate-100">
             {filteredCampaigns.map((camp) => {
               const linkedCourse = coursesMap.get(camp.courseId) || null;
+              const deleteEligibility = evaluateCampaignDeletionEligibility(camp);
+              const isCheckingThisRow = checkingDeleteId === camp.id;
               return (
                 <div
                   key={camp.id}
@@ -463,6 +578,29 @@ export const PromotionDashboardTab: React.FC<PromotionDashboardTabProps> = ({
                       <Download className="w-3.5 h-3.5" />
                       CSV
                     </button>
+                    <button
+                      type="button"
+                      disabled={!deleteEligibility.allowed || isCheckingThisRow}
+                      onClick={() => handleRequestDeleteCampaign(camp)}
+                      title={
+                        deleteEligibility.allowed
+                          ? "ลบแคมเปญนี้ (เฉพาะ draft / ready / paused ที่ยังไม่มีผู้รับ sent หรือ unknown)"
+                          : deleteEligibility.reason
+                      }
+                      aria-label={`ลบแคมเปญ ${camp.courseTitle}`}
+                      className={
+                        deleteEligibility.allowed
+                          ? "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-red-200 bg-white hover:bg-red-50 hover:border-red-300 text-xs font-semibold text-red-700 disabled:opacity-50 transition-colors"
+                          : "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-300 cursor-not-allowed"
+                      }
+                    >
+                      {isCheckingThisRow ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
+                      ลบ
+                    </button>
                   </div>
                 </div>
               );
@@ -470,6 +608,148 @@ export const PromotionDashboardTab: React.FC<PromotionDashboardTabProps> = ({
           </div>
         )}
       </div>
+
+      {/* Safe Delete Confirmation Modal */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-[2px] p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-campaign-modal-title"
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="px-6 py-4 bg-red-50 border-b border-red-100 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-red-100 text-red-700 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 id="delete-campaign-modal-title" className="text-base font-bold text-red-900">
+                    ยืนยันการลบแคมเปญประชาสัมพันธ์
+                  </h2>
+                  <p className="text-xs text-red-700">
+                    การลบแคมเปญและรายชื่อผู้รับไม่สามารถกู้คืนได้
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={isDeletingCampaign}
+                onClick={() => {
+                  setDeleteTarget(null);
+                  setDeleteError(null);
+                  setDeleteAdminConfirmed(false);
+                }}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-white/70 disabled:opacity-40"
+                aria-label="ปิดหน้าต่างยืนยัน"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5 text-xs">
+                <div className="flex items-start justify-between gap-3">
+                  <span className="text-slate-500 shrink-0">ชื่อหลักสูตร:</span>
+                  <span className="font-bold text-slate-900 text-right">{deleteTarget.courseTitle || "-"}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-500 shrink-0">Campaign ID:</span>
+                  <span className="font-mono text-[11px] font-semibold text-slate-800 break-all text-right">
+                    {deleteTarget.id}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-500 shrink-0">สถานะแคมเปญ:</span>
+                  <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-800 font-bold uppercase text-[11px]">
+                    {deleteTarget.status}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-500 shrink-0">จำนวนผู้รับทั้งหมด:</span>
+                  <span className="font-bold text-slate-900 tabular-nums">{deleteTarget.totalRecipients} รายการ</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-500 shrink-0">จำนวนที่ส่งอีเมลแล้ว:</span>
+                  <span className="font-bold text-slate-900 tabular-nums">{deleteTarget.sentCount} รายการ</span>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 leading-relaxed flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="block font-bold">คำเตือน: ไม่สามารถย้อนกลับได้ (Cannot be undone)</strong>
+                  ระบบจะลบทั้งเอกสารแคมเปญและรายชื่อผู้รับทั้งหมดในแคมเปญนี้ (subcollection) ออกจากฐานข้อมูลอย่างถาวร โดยจะไม่กระทบข้อมูลหลักสูตร การลงทะเบียน การประเมิน หรือ Suppression List
+                </div>
+              </div>
+
+              {deleteError && (
+                <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-900 space-y-1.5">
+                  <div className="font-bold">ไม่สามารถดำเนินการลบจนเสร็จสมบูรณ์ได้</div>
+                  <div className="leading-relaxed break-words">{deleteError.message}</div>
+                  {deleteError.partialRetryable ? (
+                    <div className="text-[11px] text-red-800 font-medium">
+                      แนวทางแก้ไข: กดปุ่ม &quot;ลองลบที่เหลืออีกครั้ง&quot; เพื่อทำความสะอาดรายการที่ค้างอยู่ต่อ หรือกดปิดเพื่อตรวจสอบรายการในแดชบอร์ด
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-red-800 font-medium">
+                      ระบบได้รีเฟรชข้อมูลล่าสุดแล้ว แคมเปญนี้ถูกปกป้องไว้ตามเงื่อนไขความปลอดภัย กรุณาปิดหน้าต่างเพื่อตรวจสอบสถานะในแดชบอร์ด
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-300 bg-white cursor-pointer hover:bg-slate-50">
+                <input
+                  type="checkbox"
+                  checked={deleteAdminConfirmed}
+                  disabled={isDeletingCampaign}
+                  onChange={(e) => setDeleteAdminConfirmed(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-400 text-red-700 focus:ring-red-600"
+                />
+                <span className="text-xs text-slate-700 leading-relaxed">
+                  ข้าพเจ้าในฐานะผู้ดูแลระบบยืนยันการลบแคมเปญนี้และรายชื่อผู้รับทั้งหมดภายในแคมเปญอย่างถาวร และเข้าใจว่าไม่สามารถกู้คืนได้
+                </span>
+              </label>
+
+              <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isDeletingCampaign}
+                  onClick={() => {
+                    setDeleteTarget(null);
+                    setDeleteError(null);
+                    setDeleteAdminConfirmed(false);
+                  }}
+                  className="px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-bold text-slate-700 disabled:opacity-40"
+                >
+                  ยกเลิก
+                </button>
+                {(!deleteError || deleteError.partialRetryable) && (
+                  <button
+                    type="button"
+                    disabled={isDeletingCampaign || !deleteAdminConfirmed}
+                    onClick={handleConfirmDeleteCampaign}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-red-700 hover:bg-red-800 text-white text-xs font-bold disabled:opacity-40 transition-colors"
+                  >
+                    {isDeletingCampaign ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        กำลังลบข้อมูล...
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="w-3.5 h-3.5" />
+                        {deleteError?.partialRetryable ? "ลองลบที่เหลืออีกครั้ง" : "ยืนยันการลบแคมเปญ"}
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

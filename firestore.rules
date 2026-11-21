@@ -214,12 +214,22 @@ service cloud.firestore {
         isValidPromotionCampaign(request.resource.data) &&
         request.resource.data.createdByAdminUid == resource.data.createdByAdminUid &&
         request.resource.data.courseId == resource.data.courseId;
-      allow delete: if isAdmin();
+      allow delete: if isAdmin() &&
+        resource.data.status in ['draft', 'ready', 'paused'] &&
+        (!('sentCount' in resource.data) || resource.data.sentCount == 0) &&
+        (!('unknownCount' in resource.data) || resource.data.unknownCount == 0) &&
+        (!('activeLockUntil' in resource.data) || resource.data.activeLockUntil == '');
 
       match /recipients/{recipientId} {
         allow get, list: if isAdmin();
         allow create, update: if isAdmin() && isValidCampaignRecipient(request.resource.data, campaignId);
-        allow delete: if isAdmin();
+        allow delete: if isAdmin() &&
+          !(resource.data.status in ['sent', 'unknown', 'processing']) &&
+          get(/databases/$(database)/documents/promotion_campaigns/$(campaignId)).data.status in ['draft', 'ready', 'paused'] &&
+          (!('sentCount' in get(/databases/$(database)/documents/promotion_campaigns/$(campaignId)).data) ||
+            get(/databases/$(database)/documents/promotion_campaigns/$(campaignId)).data.sentCount == 0) &&
+          (!('unknownCount' in get(/databases/$(database)/documents/promotion_campaigns/$(campaignId)).data) ||
+            get(/databases/$(database)/documents/promotion_campaigns/$(campaignId)).data.unknownCount == 0);
       }
     }
 

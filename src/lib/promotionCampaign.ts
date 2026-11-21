@@ -138,6 +138,7 @@ export interface PromotionCampaignDoc {
   suppressedCount: number;
   batchSize: number;
   remainingQuota?: number | null;
+  activeLockUntil?: string;
   lastProcessedAt?: string;
   lastBatchError?: string;
   createdByAdminUid: string;
@@ -1204,6 +1205,177 @@ export async function dispatchPromotionBatch(params: {
       code: "UPSTREAM_ERROR",
       outcomeAmbiguous: true,
       message: `การเชื่อมต่อขาดหายระหว่างส่งชุดข้อมูล (${err?.message || "Network timeout"}) — สถานะการจัดส่งอาจเป็น Unknown กรุณาตรวจสอบสถานะผู้รับในแดชบอร์ดก่อนส่งต่อ`,
+    };
+  }
+}
+
+export interface CampaignDeletionEligibility {
+  allowed: boolean;
+  code?:
+    | "CAMPAIGN_COMPLETED_PROTECTED"
+    | "CAMPAIGN_SENDING"
+    | "CAMPAIGN_STATUS_BLOCKED"
+    | "CAMPAIGN_LOCKED"
+    | "CAMPAIGN_HAS_SENT"
+    | "CAMPAIGN_HAS_UNKNOWN"
+    | "CAMPAIGN_HAS_PROCESSING";
+  reason?: string;
+}
+
+const DELETABLE_CAMPAIGN_STATUSES = new Set<string>(["draft", "ready", "paused"]);
+
+/**
+ * Shared guard determining whether a promotion campaign is safe for ordinary Admin cleanup.
+ * Only `draft`, `ready`, and clean `paused` campaigns with ZERO `sent`, `unknown`, or `processing`
+ * recipients and no active dispatch lock may be deleted.
+ */
+export function evaluateCampaignDeletionEligibility(
+  campaign: Pick<PromotionCampaignDoc, "status" | "sentCount" | "unknownCount" | "activeLockUntil">,
+  recipients?: Array<Pick<PromotionRecipientDoc, "status">>,
+  nowMs: number = Date.now()
+): CampaignDeletionEligibility {
+  const status = String(campaign.status || "").trim();
+
+  if (status === "completed" || status === "completed_with_issues") {
+    return {
+      allowed: false,
+      code: "CAMPAIGN_COMPLETED_PROTECTED",
+      reason: "แคมเปญที่ส่งเสร็จสิ้นแล้วถูกเก็บรักษาเป็นประวัติการส่ง ไม่สามารถลบได้",
+    };
+  }
+
+  if (status === "sending") {
+    return {
+      allowed: false,
+      code: "CAMPAIGN_SENDING",
+      reason: "แคมเปญกำลังอยู่ระหว่างการจัดส่ง (sending) ไม่สามารถลบได้",
+    };
+  }
+
+  if (!DELETABLE_CAMPAIGN_STATUSES.has(status)) {
+    return {
+      allowed: false,
+      code: "CAMPAIGN_STATUS_BLOCKED",
+      reason: `สถานะแคมเปญ (${status || "unknown"}) ไม่อนุญาตให้ลบ`,
+    };
+  }
+
+  const lockUntilMs = campaign.activeLockUntil ? new Date(campaign.activeLockUntil).getTime() : 0;
+  if (Number.isFinite(lockUntilMs) && lockUntilMs > nowMs) {
+    return {
+      allowed: false,
+      code: "CAMPAIGN_LOCKED",
+      reason: "แคมเปญมี Lock การประมวลผลค้างอยู่ชั่วคราว กรุณารอให้การทำงานเสร็จสิ้นก่อน",
+    };
+  }
+
+  const hasSentRecipient = Array.isArray(recipients) && recipients.some((r) => r.status === "sent");
+  if ((Number(campaign.sentCount) || 0) > 0 || hasSentRecipient) {
+    return {
+      allowed: false,
+      code: "CAMPAIGN_HAS_SENT",
+      reason: "แคมเปญนี้มีผู้รับที่ส่งอีเมลแล้ว จึงถูกเก็บรักษาเป็นประวัติและไม่สามารถลบได้",
+    };
+  }
+
+  const hasUnknownRecipient = Array.isArray(recipients) && recipients.some((r) => r.status === "unknown");
+  if ((Number(campaign.unknownCount) || 0) > 0 || hasUnknownRecipient) {
+    return {
+      allowed: false,
+      code: "CAMPAIGN_HAS_UNKNOWN",
+      reason: "แคมเปญนี้มีรายชื่อสถานะ Unknown ที่ต้องตรวจสอบก่อน จึงไม่สามารถลบได้",
+    };
+  }
+
+  const hasProcessingRecipient = Array.isArray(recipients) && recipients.some((r) => r.status === "processing");
+  if (hasProcessingRecipient) {
+    return {
+      allowed: false,
+      code: "CAMPAIGN_HAS_PROCESSING",
+      reason: "มีรายชื่อผู้รับกำลังอยู่ในสถานะ Processing ไม่สามารถลบได้",
+    };
+  }
+
+  return { allowed: true };
+}
+
+export interface DeleteCampaignResponse {
+  ok: boolean;
+  httpStatus?: number;
+  code?: string;
+  message: string;
+  campaignId?: string;
+  deletedRecipientsCount?: number;
+  remainingRecipientsCount?: number;
+  partialFailure?: boolean;
+}
+
+export async function deletePromotionCampaign(params: {
+  idToken: string;
+  campaignId: string;
+  adminConfirmed: boolean;
+  fetchImpl?: typeof fetch;
+}): Promise<DeleteCampaignResponse> {
+  if (!params.adminConfirmed) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      code: "CONFIRMATION_REQUIRED",
+      message: "ต้องได้รับการยืนยันจากผู้ดูแลระบบก่อนลบแคมเปญ",
+    };
+  }
+
+  try {
+    const { res, json, rawText, isNonJsonRouting404 } = await postPromotionGateway({
+      idToken: params.idToken,
+      fetchImpl: params.fetchImpl,
+      payload: {
+        action: "delete_campaign",
+        campaignId: params.campaignId,
+        adminConfirmed: true,
+      },
+    });
+
+    if (isNonJsonRouting404) {
+      return {
+        ok: false,
+        httpStatus: 404,
+        code: "ENDPOINT_NOT_FOUND",
+        message: "ไม่พบปลายทางลบแคมเปญบนเซิร์ฟเวอร์ (HTTP 404 — Function Endpoint Not Found)",
+      };
+    }
+
+    if (!json) {
+      return {
+        ok: false,
+        httpStatus: res.status,
+        code: "AMBIGUOUS_RESPONSE",
+        partialFailure: true,
+        message: `เซิร์ฟเวอร์ตอบกลับไม่สมบูรณ์ระหว่างลบแคมเปญ (HTTP ${res.status}) — กรุณารีเฟรชรายการเพื่อตรวจสอบว่าแคมเปญถูกลบครบถ้วนแล้วหรือไม่${rawText ? "" : ""}`,
+      };
+    }
+
+    const ok = res.ok && json.status !== "error";
+    return {
+      ok,
+      httpStatus: res.status,
+      code: typeof json.code === "string" ? json.code : !ok ? `HTTP_${res.status}` : undefined,
+      message:
+        json.message ||
+        (ok ? "ลบแคมเปญและรายชื่อผู้รับเรียบร้อยแล้ว" : `ลบแคมเปญไม่สำเร็จ (HTTP ${res.status})`),
+      campaignId: json.campaignId || params.campaignId,
+      deletedRecipientsCount:
+        typeof json.deletedRecipientsCount === "number" ? json.deletedRecipientsCount : undefined,
+      remainingRecipientsCount:
+        typeof json.remainingRecipientsCount === "number" ? json.remainingRecipientsCount : undefined,
+      partialFailure: Boolean(json.partialFailure || json.code === "DELETE_PARTIAL_FAILURE"),
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      code: "NETWORK_ERROR",
+      partialFailure: true,
+      message: `เกิดข้อผิดพลาดระหว่างติดต่อเซิร์ฟเวอร์เพื่อลบแคมเปญ (${err?.message || "Network error"}) — กรุณารีเฟรชและลองลบอีกครั้งหากแคมเปญยังคงอยู่`,
     };
   }
 }
