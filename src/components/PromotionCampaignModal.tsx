@@ -40,6 +40,7 @@ import {
   listSuppressionList,
   saveCampaignAndRecipients,
   resolveUnknownRecipientsDecision,
+  updateCampaignRegistrationUrl,
 } from "../lib/promotionCampaignService";
 import { resolveInitialPublicAppUrl, validatePublicAppUrl } from "../lib/appUrl";
 import {
@@ -191,7 +192,8 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
       if (res.ok) {
         setRemainingQuota(res.remainingDailyQuota ?? null);
       } else {
-        setQuotaError(res.message || "ไม่สามารถตรวจสอบโควตา MailApp ได้");
+        const tag = res.httpStatus ? `[HTTP ${res.httpStatus}${res.code ? ` · ${res.code}` : ""}] ` : res.code ? `[${res.code}] ` : "";
+        setQuotaError(`${tag}${res.message || "ไม่สามารถตรวจสอบโควตา MailApp ได้"}`);
       }
     } catch (err: any) {
       setQuotaError(err?.message || "ไม่สามารถเชื่อมต่อบริการตรวจสอบโควตา");
@@ -567,12 +569,17 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
         template,
         poster,
       });
-      setTestResultMsg({ ok: res.ok, text: res.message });
+      const errTag =
+        !res.ok && (res.httpStatus || res.code)
+          ? `[${res.httpStatus ? `HTTP ${res.httpStatus}` : ""}${res.httpStatus && res.code ? " · " : ""}${res.code || ""}] `
+          : "";
+      const displayMsg = `${errTag}${res.message}`;
+      setTestResultMsg({ ok: res.ok, text: displayMsg });
       if (typeof res.remainingDailyQuota === "number") {
         setRemainingQuota(res.remainingDailyQuota);
       }
-      if (res.ok) toast.success(res.message);
-      else toast.error(res.message);
+      if (res.ok) toast.success(displayMsg);
+      else toast.error(displayMsg);
     } catch (err: any) {
       const msg = err?.message || "ส่งอีเมลทดสอบไม่สำเร็จ";
       setTestResultMsg({ ok: false, text: msg });
@@ -590,6 +597,12 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
 
     const isExistingResumable = Boolean(campaignDoc && campaignRecipients.length > 0);
     if (isExistingResumable && rawCandidates.length === 0) {
+      if (campaignDoc && campaignDoc.registrationUrl !== registrationUrl) {
+        const syncedUrl = await updateCampaignRegistrationUrl(campaignDoc.id, registrationUrl);
+        const updatedDoc = { ...campaignDoc, registrationUrl: syncedUrl };
+        setCampaignDoc(updatedDoc);
+        return updatedDoc;
+      }
       return campaignDoc!;
     }
 
@@ -673,8 +686,15 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
         onCampaignUpdated?.();
 
         if (!res.ok) {
-          setDispatchLog(`หยุดการส่ง: ${res.message}`);
-          toast.error(res.message);
+          const statusTag =
+            res.httpStatus || res.code
+              ? `[${res.httpStatus ? `HTTP ${res.httpStatus}` : ""}${res.httpStatus && res.code ? " · " : ""}${res.code || ""}] `
+              : "";
+          const formattedError = res.outcomeAmbiguous
+            ? `${statusTag}สถานะไม่แน่ชัด (Unknown): ${res.message} — โปรดตรวจสอบสถานะผู้รับในหน้าผลลัพธ์ (Step 6) ก่อนกดส่งซ้ำ`
+            : `${statusTag}${res.message}`;
+          setDispatchLog(`หยุดการส่ง: ${formattedError}`);
+          toast.error(formattedError, { duration: 7000 });
           break;
         }
 

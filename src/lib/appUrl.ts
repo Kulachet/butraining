@@ -253,37 +253,24 @@ export function buildEvaluationEmailUrl(
 }
 
 /**
- * Constructs a stable published course registration URL targeting the landing page
- * with a clean `?course={courseId}` hash query so participants land directly on the
- * live registration portal for the selected course.
+ * Constructs the stable published homepage registration URL (`https://butraining.netlify.app/`)
+ * without course-specific hash fragments or query parameters.
  */
 export function buildCourseRegistrationUrl(
   baseUrl: string,
-  courseId: string
+  _courseId?: string
 ): string {
   const validation = validatePublicAppUrl(baseUrl);
   if (!validation.valid || !validation.normalizedBaseUrl) {
     throw new Error(validation.reason || "Invalid published public application URL.");
   }
 
-  const trimmedCourseId = typeof courseId === "string" ? courseId.trim() : "";
-  if (
-    !trimmedCourseId ||
-    trimmedCourseId.includes("/") ||
-    trimmedCourseId.includes("?") ||
-    trimmedCourseId.includes("#")
-  ) {
-    throw new Error("Invalid courseId for course registration URL.");
-  }
-
   const url = new URL(validation.normalizedBaseUrl);
   const cleanPath = url.pathname.replace(/\/+$/, "");
   url.pathname = cleanPath ? `${cleanPath}/` : "/";
   url.search = "";
+  url.hash = "";
 
-  const params = new URLSearchParams();
-  params.set("course", trimmedCourseId);
-  url.hash = `#/?${params.toString()}`;
   return url.toString();
 }
 

@@ -8,6 +8,8 @@ import {
   buildCampaignRegistrationLink,
   buildSuppressionDocId,
   deriveInitialPosterFromCourse,
+  dispatchPromotionBatch,
+  fetchPromotionQuota,
   generateCampaignResultsCsv,
   getDefaultPromotionTemplate,
   isAuthorizedUniversityEmail,
@@ -15,16 +17,21 @@ import {
   normalizeEmailAddress,
   parseEmailAddressesText,
   parseRecipientsCsvContent,
+  PROMOTION_GATEWAY_ENDPOINT,
+  PROMOTION_GATEWAY_FALLBACK_ENDPOINT,
   reconcileAndValidateRecipients,
   renderPromotionEmail,
   resolveGreetingForRecipient,
   resolveInitialCampaignLanguage,
+  sendPromotionTestEmail,
   validateExternalPosterUrl,
 } from "../src/lib/promotionCampaign";
+import { buildCourseRegistrationUrl } from "../src/lib/appUrl";
 import { buildFirestoreCampaignRecord } from "../src/lib/promotionCampaignService";
 import {
   containsDangerousHtmlOrScript,
   handler as promotionHandler,
+  handlePromotionWithDeps,
   isAuthorizedBuEmail,
   validatePosterPayload,
   validatePublishedRegistrationUrl,
@@ -74,16 +81,20 @@ async function main() {
     const thRendered = renderPromotionEmail({
       course: thCourse,
       template: thTemplate,
-      registrationUrl: "https://butraining.netlify.app/#/?course=course-th-1",
+      registrationUrl: "https://butraining.netlify.app/",
       recipientName: "ผศ.ดร.วิภาดา",
       posterSrc: "cid:coursePoster",
     });
 
+    assert.ok(thRendered.htmlBody.includes('<tr><td align="left" style="text-align:left;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;width:100%;margin:0;'), "Outer container must be left-aligned without auto-centering margins");
+    assert.ok(thRendered.htmlBody.includes('<td align="center" style="padding:6px 0 18px 0;">'), "CTA button internal alignment must stay centered");
+    assert.ok(thRendered.htmlBody.includes('text-align:center;background-color:#ffffff;"><img '), "Poster internal alignment must stay centered");
     assert.ok(thRendered.htmlBody.includes("#8b0000"), "BU dark red brand color missing");
     assert.ok(thRendered.htmlBody.includes("ลงทะเบียนเข้าอบรม"));
     assert.ok(thRendered.htmlBody.includes('src="cid:coursePoster"'));
     assert.ok(thRendered.htmlBody.includes("เรียน ผศ.ดร.วิภาดา"));
-    assert.ok(thRendered.textBody.includes("https://butraining.netlify.app/#/?course=course-th-1"));
+    assert.ok(thRendered.textBody.includes("https://butraining.netlify.app/"));
+    assert.ok(!thRendered.htmlBody.includes("#/?course="), "Registration CTA and link must not include course-specific hash/query");
 
     // Language override to EN without modifying original course record
     const enTemplate = getDefaultPromotionTemplate(
@@ -94,7 +105,7 @@ async function main() {
     const enRendered = renderPromotionEmail({
       course: { ...thCourse, title: "Active Learning with AI", instructorName: "Dr. Somchai Jaidee" },
       template: enTemplate,
-      registrationUrl: "https://butraining.netlify.app/#/?course=course-th-1",
+      registrationUrl: "https://butraining.netlify.app/",
       recipientName: "Dr. Alice",
       isTest: true,
     });
@@ -119,7 +130,7 @@ async function main() {
     const xssRendered = renderPromotionEmail({
       course: { id: "c1", title: '<script>alert("xss")</script>' },
       template: { ...enTemplate, invitationMessage: '<img src=x onerror="alert(1)">' },
-      registrationUrl: "https://butraining.netlify.app/#/?course=c1",
+      registrationUrl: "https://butraining.netlify.app/",
     });
     assert.ok(!xssRendered.htmlBody.includes("<script>"), "Raw <script> tag must be escaped");
     assert.ok(!xssRendered.htmlBody.includes('<img src=x onerror='), "Injected event handler must be escaped");
@@ -170,17 +181,48 @@ async function main() {
     assert.ok(MAX_POSTER_BYTES === 800 * 1024);
   });
 
-  // 4. Published registration link validation & preview/localhost blocking
-  await runTest("4. Registration link targets published portal and rejects preview/localhost URLs", () => {
+  // 4. Published registration link validation, legacy draft normalization & preview/localhost blocking
+  await runTest("4. Registration link targets exact homepage URL (even from legacy drafts) and rejects preview/localhost URLs", () => {
     const liveUrl = buildCampaignRegistrationLink("https://butraining.netlify.app/", "course_2026_01");
-    assert.equal(liveUrl, "https://butraining.netlify.app/#/?course=course_2026_01");
+    assert.equal(liveUrl, "https://butraining.netlify.app/");
+    assert.equal(buildCourseRegistrationUrl("https://butraining.netlify.app", "course_2026_01"), "https://butraining.netlify.app/");
     assert.equal(validatePublishedRegistrationUrl(liveUrl).valid, true);
+    assert.equal(validatePublishedRegistrationUrl(liveUrl).normalizedUrl, "https://butraining.netlify.app/");
+
+    // Existing legacy draft containing #/?course= must normalize to clean homepage URL everywhere
+    const legacyDraftUrl = "https://butraining.netlify.app/#/?course=legacy_course_99";
+    assert.equal(validatePublishedRegistrationUrl(legacyDraftUrl).normalizedUrl, "https://butraining.netlify.app/");
+
+    const draftNormalizedRecord = buildFirestoreCampaignRecord({
+      campaignId: "camp_legacy_fix",
+      courseId: "legacy_course_99",
+      courseTitle: "Legacy Draft Course",
+      language: "en",
+      template: getDefaultPromotionTemplate({ title: "Legacy Draft Course" }, "en"),
+      registrationUrl: legacyDraftUrl,
+      poster: { mode: "none" },
+      recipientsCount: 5,
+      suppressedCount: 0,
+      adminUid: "admin-1",
+      adminEmail: "admin@bu.ac.th",
+    });
+    assert.equal(draftNormalizedRecord.registrationUrl, "https://butraining.netlify.app/");
+
+    const renderedLegacy = renderPromotionEmail({
+      course: { id: "legacy_course_99", title: "Legacy Draft Course" },
+      template: getDefaultPromotionTemplate({ title: "Legacy Draft Course" }, "en"),
+      registrationUrl: legacyDraftUrl,
+    });
+    assert.ok(!renderedLegacy.htmlBody.includes("#/?course="));
+    assert.ok(!renderedLegacy.textBody.includes("#/?course="));
+    assert.ok(renderedLegacy.htmlBody.includes('href="https://butraining.netlify.app/"'));
+    assert.ok(renderedLegacy.textBody.includes("https://butraining.netlify.app/"));
 
     assert.throws(() => buildCampaignRegistrationLink("https://ais-pre-1234.asia-east1.run.app", "c1"));
     assert.throws(() => buildCampaignRegistrationLink("http://localhost:3000", "c1"));
 
-    assert.equal(validatePublishedRegistrationUrl("https://ais-pre-999.run.app/#/?course=c1").valid, false);
-    assert.equal(validatePublishedRegistrationUrl("http://127.0.0.1:3000/#/?course=c1").valid, false);
+    assert.equal(validatePublishedRegistrationUrl("https://ais-pre-999.run.app/").valid, false);
+    assert.equal(validatePublishedRegistrationUrl("http://127.0.0.1:3000/").valid, false);
   });
 
   // 5. Large bulk paste parsing (1,200+ mixed entries)
@@ -263,7 +305,7 @@ async function main() {
       courseTitle: "Course Title",
       language: "th",
       template: getDefaultPromotionTemplate({ title: "Course Title" }, "th"),
-      registrationUrl: "https://butraining.netlify.app/#/?course=course_1",
+      registrationUrl: "https://butraining.netlify.app/",
       poster: {
         mode: "inline_cid",
         inlineBase64: "AAAA".repeat(2000),
@@ -369,6 +411,576 @@ async function main() {
     assert.ok(!module20Fn.includes("send_course_promotion"));
     const legacyGas = fs.readFileSync(path.join(ROOT_DIR, "GAS_EN_CODE.gs"), "utf8");
     assert.ok(!legacyGas.includes("send_course_promotion"));
+  });
+
+  // Helper: minimal stateful mock Firestore DB matching Admin SDK surface used by handlePromotionWithDeps
+  function createMockAdminDb(seed: {
+    courses?: Record<string, any>;
+    campaigns?: Record<string, any>;
+    recipientsByCampaign?: Record<string, Record<string, any>>;
+    suppressions?: Record<string, any>;
+  }) {
+    const store = {
+      courses: structuredClone(seed.courses || {}),
+      promotion_campaigns: structuredClone(seed.campaigns || {}),
+      recipientsByCampaign: structuredClone(seed.recipientsByCampaign || {}),
+      promotion_suppressions: structuredClone(seed.suppressions || {}),
+    };
+
+    const makeDocRef = (colPath: string, docId: string, parentCampaignId?: string): any => ({
+      id: docId,
+      path: parentCampaignId ? `promotion_campaigns/${parentCampaignId}/recipients/${docId}` : `${colPath}/${docId}`,
+      async get() {
+        const map = parentCampaignId
+          ? (store.recipientsByCampaign[parentCampaignId] ||= {})
+          : (store as any)[colPath];
+        const data = map?.[docId];
+        return {
+          id: docId,
+          exists: Boolean(data),
+          data: () => (data ? structuredClone(data) : undefined),
+          ref: makeDocRef(colPath, docId, parentCampaignId),
+        };
+      },
+      async update(patch: Record<string, any>) {
+        const map = parentCampaignId
+          ? (store.recipientsByCampaign[parentCampaignId] ||= {})
+          : (store as any)[colPath];
+        if (!map?.[docId]) throw new Error(`Doc not found: ${colPath}/${docId}`);
+        map[docId] = { ...map[docId], ...structuredClone(patch) };
+      },
+    });
+
+    const makeCollection = (colPath: string, parentCampaignId?: string): any => {
+      const getMap = () =>
+        parentCampaignId
+          ? (store.recipientsByCampaign[parentCampaignId] ||= {})
+          : ((store as any)[colPath] || {});
+
+      return {
+        doc: (docId: string) => makeDocRef(colPath, docId, parentCampaignId),
+        async get() {
+          const map = getMap();
+          const docs = Object.entries(map).map(([id, data]) => ({
+            id,
+            exists: true,
+            data: () => structuredClone(data),
+            ref: makeDocRef(colPath, id, parentCampaignId),
+          }));
+          return { empty: docs.length === 0, docs };
+        },
+        where(field: string, op: string, value: any) {
+          assert.equal(op, "==");
+          let max = Infinity;
+          const queryObj = {
+            limit(n: number) {
+              max = n;
+              return queryObj;
+            },
+            async get() {
+              const map = getMap();
+              const matched = Object.entries(map)
+                .filter(([, data]: any) => data?.[field] === value)
+                .slice(0, max)
+                .map(([id, data]) => ({
+                  id,
+                  exists: true,
+                  data: () => structuredClone(data),
+                  ref: makeDocRef(colPath, id, parentCampaignId),
+                }));
+              return { empty: matched.length === 0, docs: matched };
+            },
+          };
+          return queryObj;
+        },
+      };
+    };
+
+    return {
+      store,
+      collection(name: string) {
+        if (name === "promotion_campaigns") {
+          return {
+            doc(campaignId: string) {
+              const base = makeDocRef("promotion_campaigns", campaignId);
+              base.collection = (subName: string) => {
+                assert.equal(subName, "recipients");
+                return makeCollection("recipients", campaignId);
+              };
+              return base;
+            },
+          };
+        }
+        return makeCollection(name);
+      },
+      batch() {
+        const ops: Array<{ ref: any; patch: Record<string, any> }> = [];
+        return {
+          update(ref: any, patch: Record<string, any>) {
+            ops.push({ ref, patch });
+          },
+          async commit() {
+            for (const op of ops) {
+              await op.ref.update(op.patch);
+            }
+          },
+        };
+      },
+      async runTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
+        const tx = {
+          async get(target: any) {
+            return await target.get();
+          },
+          update(ref: any, patch: Record<string, any>) {
+            // Queue or apply update directly since single-process mock
+            opsQueue.push(() => ref.update(patch));
+          },
+        };
+        const opsQueue: Array<() => Promise<void>> = [];
+        const res = await fn(tx);
+        for (const runOp of opsQueue) {
+          await runOp();
+        }
+        return res;
+      },
+    };
+  }
+
+  // 14. Netlify redirects & client endpoint alignment + safe non-executing 404 fallback
+  await runTest("14. Primary gateway uses /api/send-course-promotion with Netlify redirects and safe routing-404 fallback", async () => {
+    assert.equal(PROMOTION_GATEWAY_ENDPOINT, "/api/send-course-promotion");
+    assert.equal(PROMOTION_GATEWAY_FALLBACK_ENDPOINT, "/.netlify/functions/send-course-promotion");
+
+    const netlifyToml = fs.readFileSync(path.join(ROOT_DIR, "netlify.toml"), "utf8");
+    const redirects = fs.readFileSync(path.join(ROOT_DIR, "public/_redirects"), "utf8");
+    assert.ok(netlifyToml.includes('from = "/api/*"') && netlifyToml.includes('to = "/.netlify/functions/:splat"'));
+    assert.ok(redirects.includes("/api/* /.netlify/functions/:splat 200"));
+
+    // Simulate /api/* returning non-JSON 404 -> falls back once to /.netlify/functions/send-course-promotion
+    const calledUrls: string[] = [];
+    const resFallback = await dispatchPromotionBatch({
+      idToken: "mock-token",
+      campaignId: "camp_1",
+      fetchImpl: (async (url: RequestInfo | URL) => {
+        calledUrls.push(String(url));
+        if (String(url) === "/api/send-course-promotion") {
+          return new Response("Not Found", { status: 404, headers: { "Content-Type": "text/plain" } });
+        }
+        return new Response(
+          JSON.stringify({ status: "success", processedCount: 1, sentCount: 1, remainingPending: 0 }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }) as typeof fetch,
+    });
+    assert.deepEqual(calledUrls, ["/api/send-course-promotion", "/.netlify/functions/send-course-promotion"]);
+    assert.equal(resFallback.ok, true);
+    assert.equal(resFallback.sentCount, 1);
+
+    // Simulate reached server returning JSON 404 (e.g. CAMPAIGN_NOT_FOUND): must NOT trigger blind fallback retry
+    const calledJson404: string[] = [];
+    const resCampaign404 = await dispatchPromotionBatch({
+      idToken: "mock-token",
+      campaignId: "missing_camp",
+      fetchImpl: (async (url: RequestInfo | URL) => {
+        calledJson404.push(String(url));
+        return new Response(
+          JSON.stringify({ status: "error", code: "CAMPAIGN_NOT_FOUND", message: "Campaign not found" }),
+          { status: 404, headers: { "Content-Type": "application/json" } }
+        );
+      }) as typeof fetch,
+    });
+    assert.deepEqual(calledJson404, ["/api/send-course-promotion"]);
+    assert.equal(resCampaign404.ok, false);
+    assert.equal(resCampaign404.httpStatus, 404);
+    assert.equal(resCampaign404.code, "CAMPAIGN_NOT_FOUND");
+    assert.equal(resCampaign404.outcomeAmbiguous, false);
+
+    // Simulate reached gateway returning incomplete non-JSON 502: marks outcomeAmbiguous=true and does NOT retry
+    const called502: string[] = [];
+    const resIncomplete502 = await dispatchPromotionBatch({
+      idToken: "mock-token",
+      campaignId: "camp_1",
+      fetchImpl: (async (url: RequestInfo | URL) => {
+        called502.push(String(url));
+        return new Response("Bad Gateway truncated", { status: 502, headers: { "Content-Type": "text/plain" } });
+      }) as typeof fetch,
+    });
+    assert.deepEqual(called502, ["/api/send-course-promotion"]);
+    assert.equal(resIncomplete502.ok, false);
+    assert.equal(resIncomplete502.httpStatus, 502);
+    assert.equal(resIncomplete502.code, "UPSTREAM_ERROR");
+    assert.equal(resIncomplete502.outcomeAmbiguous, true);
+  });
+
+  // 15. Exact Firestore campaignId matching (dots/mixed IDs) + CAMPAIGN_NOT_FOUND & COURSE_NOT_FOUND + GATEWAY_UNCONFIGURED
+  await runTest("15. Dispatch finds exact campaignId (including dots) & returns structured CAMPAIGN_NOT_FOUND / COURSE_NOT_FOUND / GATEWAY_UNCONFIGURED", async () => {
+    const db = createMockAdminDb({
+      courses: {
+        "course-existing": { title: "AI Training 2026", language: "en" },
+      },
+      campaigns: {
+        "camp.2026.dotted_id": {
+          id: "camp.2026.dotted_id",
+          courseId: "course-existing",
+          language: "en",
+          registrationUrl: "https://butraining.netlify.app/",
+          posterMode: "none",
+          template: getDefaultPromotionTemplate({ title: "AI Training 2026" }, "en"),
+        },
+        "camp_orphaned_course": {
+          id: "camp_orphaned_course",
+          courseId: "missing-course-id",
+          language: "th",
+          registrationUrl: "https://butraining.netlify.app/",
+          posterMode: "none",
+          template: getDefaultPromotionTemplate({ title: "Missing" }, "th"),
+        },
+      },
+      recipientsByCampaign: {
+        "camp.2026.dotted_id": {},
+      },
+    });
+
+    const baseDeps = {
+      db,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      gasUrl: "https://script.google.com/macros/s/mock/exec",
+      gasSecret: "mock-secret-xyz",
+      skipRateLimit: true,
+    };
+
+    const unconfiguredRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({ action: "dispatch_batch", campaignId: "camp.2026.dotted_id" }),
+      },
+      { ...baseDeps, gasUrl: "", gasSecret: "" }
+    );
+    assert.equal(unconfiguredRes.statusCode, 503);
+    assert.equal(JSON.parse(unconfiguredRes.body).code, "GATEWAY_UNCONFIGURED");
+
+    const missingCampRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({ action: "dispatch_batch", campaignId: "does_not_exist" }),
+      },
+      baseDeps
+    );
+    assert.equal(missingCampRes.statusCode, 404);
+    assert.equal(JSON.parse(missingCampRes.body).code, "CAMPAIGN_NOT_FOUND");
+
+    const missingCourseRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({ action: "dispatch_batch", campaignId: "camp_orphaned_course" }),
+      },
+      baseDeps
+    );
+    assert.equal(missingCourseRes.statusCode, 404);
+    assert.equal(JSON.parse(missingCourseRes.body).code, "COURSE_NOT_FOUND");
+
+    // Dotted ID must be found exact (0 pending -> succeeds cleanly without mutating ID to underscore)
+    const exactMatchRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({ action: "dispatch_batch", campaignId: "camp.2026.dotted_id" }),
+      },
+      baseDeps
+    );
+    assert.equal(exactMatchRes.statusCode, 200);
+    assert.equal(JSON.parse(exactMatchRes.body).processedCount, 0);
+  });
+
+  // 16. Safe error reporting helper preserves HTTP status + error code without leaking secrets/tokens
+  await runTest("16. Client wrappers preserve HTTP status and safe codes without exposing tokens or secrets", async () => {
+    const quotaErr = await fetchPromotionQuota("secret-jwt-should-not-leak", (async () => {
+      return new Response(
+        JSON.stringify({ status: "error", code: "GATEWAY_UNCONFIGURED", message: "Mail gateway not configured" }),
+        { status: 503, headers: { "Content-Type": "application/json" } }
+      );
+    }) as typeof fetch);
+    assert.equal(quotaErr.ok, false);
+    assert.equal(quotaErr.httpStatus, 503);
+    assert.equal(quotaErr.code, "GATEWAY_UNCONFIGURED");
+    assert.ok(!JSON.stringify(quotaErr).includes("secret-jwt-should-not-leak"));
+
+    const testErr = await sendPromotionTestEmail({
+      idToken: "secret-jwt-should-not-leak",
+      courseId: "c1",
+      testEmail: "admin@bu.ac.th",
+      language: "en",
+      registrationUrl: "https://butraining.netlify.app/",
+      template: getDefaultPromotionTemplate({ title: "Test" }, "en"),
+      poster: { mode: "none" },
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({ status: "error", code: "UNAUTHORIZED", message: "Missing Bearer token" }),
+          { status: 401, headers: { "Content-Type": "application/json" } }
+        )) as typeof fetch,
+    });
+    assert.equal(testErr.ok, false);
+    assert.equal(testErr.httpStatus, 401);
+    assert.equal(testErr.code, "UNAUTHORIZED");
+    assert.ok(!JSON.stringify(testErr).includes("secret-jwt-should-not-leak"));
+  });
+
+  // 17. Mocked send_test succeeds without touching campaign recipients
+  await runTest("17. Mocked send_test dispatches [TEST] preview cleanly without modifying campaign recipients", async () => {
+    const db = createMockAdminDb({
+      courses: { "c-test": { title: "Bilingual Course", language: "th" } },
+      campaigns: { "camp-test": { id: "camp-test", courseId: "c-test", sentCount: 0, pendingCount: 1 } },
+      recipientsByCampaign: {
+        "camp-test": {
+          "rec-1": { email: "faculty@bu.ac.th", name: "Faculty 1", status: "pending", attempts: 0 },
+        },
+      },
+    });
+
+    let gasCaptured: any = null;
+    const res = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({
+          action: "send_test",
+          courseId: "c-test",
+          campaignId: "camp-test",
+          testEmail: "kulachet.l@bu.ac.th",
+          language: "th",
+          registrationUrl: "https://butraining.netlify.app/",
+          template: getDefaultPromotionTemplate({ title: "Bilingual Course" }, "th"),
+          poster: { mode: "none" },
+        }),
+      },
+      {
+        db,
+        verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+        verifyAdmin: async () => true,
+        gasUrl: "https://script.google.com/macros/s/mock/exec",
+        gasSecret: "mock-secret",
+        skipRateLimit: true,
+        fetchFn: (async (_url: RequestInfo | URL, init?: RequestInit) => {
+          gasCaptured = JSON.parse(String(init?.body || "{}"));
+          return new Response(
+            JSON.stringify({
+              status: "success",
+              remainingDailyQuota: 99,
+              results: [{ recipientId: gasCaptured.messages[0].recipientId, status: "sent" }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }) as typeof fetch,
+      }
+    );
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(gasCaptured.isTest, true);
+    assert.ok(gasCaptured.messages[0].subject.startsWith("[TEST] "));
+    assert.equal(db.store.recipientsByCampaign["camp-test"]["rec-1"].status, "pending");
+  });
+
+  // 18. Mocked dispatch_batch processes pending -> sent & NEVER touches sent/unknown/processing rows
+  await runTest("18. Dispatch batch sends 1 pending recipient and preserves existing sent, unknown, and processing rows", async () => {
+    const db = createMockAdminDb({
+      courses: { "c-live": { title: "Live Workshop", language: "th" } },
+      campaigns: {
+        "camp-live": {
+          id: "camp-live",
+          courseId: "c-live",
+          language: "th",
+          registrationUrl: "https://butraining.netlify.app/",
+          posterMode: "none",
+          template: getDefaultPromotionTemplate({ title: "Live Workshop" }, "th"),
+          activeLockUntil: "",
+        },
+      },
+      recipientsByCampaign: {
+        "camp-live": {
+          "rec-sent": { email: "already@bu.ac.th", name: "Already Sent", status: "sent", sentAt: "2026-06-01T00:00:00Z", attempts: 1 },
+          "rec-unknown": { email: "unknown@bu.ac.th", name: "Unknown Row", status: "unknown", attempts: 1 },
+          "rec-processing": { email: "inprogress@bu.ac.th", name: "Processing Row", status: "processing", attempts: 1 },
+          "rec-pending": { email: "newfaculty@bu.ac.th", name: "New Faculty", status: "pending", attempts: 0 },
+        },
+      },
+    });
+
+    const sentTo: string[] = [];
+    const res = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({
+          action: "dispatch_batch",
+          campaignId: "camp-live",
+          batchSize: 10,
+          poster: { mode: "none" },
+        }),
+      },
+      {
+        db,
+        verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+        verifyAdmin: async () => true,
+        gasUrl: "https://script.google.com/macros/s/mock/exec",
+        gasSecret: "mock-secret",
+        skipRateLimit: true,
+        fetchFn: (async (_url: RequestInfo | URL, init?: RequestInit) => {
+          const payload = JSON.parse(String(init?.body || "{}"));
+          for (const msg of payload.messages) sentTo.push(msg.to);
+          return new Response(
+            JSON.stringify({
+              status: "success",
+              remainingDailyQuota: 95,
+              results: payload.messages.map((m: any) => ({
+                recipientId: m.recipientId,
+                status: "sent",
+                sentAt: "2026-06-02T09:00:00.000Z",
+              })),
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }) as typeof fetch,
+      }
+    );
+
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.processedCount, 1);
+    assert.equal(body.sentCount, 1);
+    assert.equal(body.remainingPending, 0);
+    assert.deepEqual(sentTo, ["newfaculty@bu.ac.th"]);
+    assert.equal(db.store.recipientsByCampaign["camp-live"]["rec-pending"].status, "sent");
+    assert.equal(db.store.recipientsByCampaign["camp-live"]["rec-sent"].status, "sent");
+    assert.equal(db.store.recipientsByCampaign["camp-live"]["rec-unknown"].status, "unknown");
+    assert.equal(db.store.recipientsByCampaign["camp-live"]["rec-processing"].status, "processing");
+    assert.equal(db.store.promotion_campaigns["camp-live"].activeLockUntil, "");
+    assert.equal(db.store.promotion_campaigns["camp-live"].sentCount, 2);
+  });
+
+  // 19. Upstream GAS failure/timeout marks newly claimed recipients Unknown (NEVER Pending) and releases lock
+  await runTest("19. Upstream timeout/failure marks claimed recipients unknown, never resets sent to pending, and releases lock", async () => {
+    const db = createMockAdminDb({
+      courses: { "c-fail": { title: "Timeout Course", language: "en" } },
+      campaigns: {
+        "camp-fail": {
+          id: "camp-fail",
+          courseId: "c-fail",
+          language: "en",
+          registrationUrl: "https://butraining.netlify.app/",
+          posterMode: "none",
+          template: getDefaultPromotionTemplate({ title: "Timeout Course" }, "en"),
+          activeLockUntil: "",
+        },
+      },
+      recipientsByCampaign: {
+        "camp-fail": {
+          "rec-already-sent": { email: "done@bu.ac.th", name: "Done", status: "sent", attempts: 1 },
+          "rec-will-timeout": { email: "wait@bu.ac.th", name: "Wait", status: "pending", attempts: 0 },
+        },
+      },
+    });
+
+    const res = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({
+          action: "dispatch_batch",
+          campaignId: "camp-fail",
+          batchSize: 5,
+          poster: { mode: "none" },
+        }),
+      },
+      {
+        db,
+        verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+        verifyAdmin: async () => true,
+        gasUrl: "https://script.google.com/macros/s/mock/exec",
+        gasSecret: "mock-secret",
+        skipRateLimit: true,
+        fetchFn: (async () => {
+          throw new Error("ETIMEDOUT contacting GAS");
+        }) as typeof fetch,
+      }
+    );
+
+    assert.equal(res.statusCode, 502);
+    const body = JSON.parse(res.body);
+    assert.equal(body.code, "UPSTREAM_ERROR");
+    assert.equal(body.unknownCount, 1);
+    assert.equal(db.store.recipientsByCampaign["camp-fail"]["rec-will-timeout"].status, "unknown");
+    assert.equal(db.store.recipientsByCampaign["camp-fail"]["rec-already-sent"].status, "sent");
+    assert.equal(db.store.promotion_campaigns["camp-fail"].activeLockUntil, "");
+    assert.equal(db.store.promotion_campaigns["camp-fail"].unknownCount, 1);
+  });
+
+  // 20. Preserve left-aligned outer container and exact https://butraining.netlify.app/ URL across Netlify server renderer too
+  await runTest("20. Server renderer preserves left alignment and exact homepage registration URL", async () => {
+    const db = createMockAdminDb({
+      courses: { "c-html": { title: "Left Align Check", language: "th" } },
+      campaigns: {
+        "camp-html": {
+          id: "camp-html",
+          courseId: "c-html",
+          language: "th",
+          registrationUrl: "https://butraining.netlify.app/#/?course=c-html",
+          posterMode: "none",
+          template: getDefaultPromotionTemplate({ title: "Left Align Check" }, "th"),
+          activeLockUntil: "",
+        },
+      },
+      recipientsByCampaign: {
+        "camp-html": {
+          "rec-1": { email: "check@bu.ac.th", name: "Dr. Check", status: "pending", attempts: 0 },
+        },
+      },
+    });
+
+    let capturedHtml = "";
+    const res = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({ action: "dispatch_batch", campaignId: "camp-html" }),
+      },
+      {
+        db,
+        verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+        verifyAdmin: async () => true,
+        gasUrl: "https://script.google.com/macros/s/mock/exec",
+        gasSecret: "mock-secret",
+        skipRateLimit: true,
+        fetchFn: (async (_url: RequestInfo | URL, init?: RequestInit) => {
+          const payload = JSON.parse(String(init?.body || "{}"));
+          capturedHtml = payload.messages[0].htmlBody;
+          return new Response(
+            JSON.stringify({
+              status: "success",
+              remainingDailyQuota: 90,
+              results: [{ recipientId: "rec-1", status: "sent" }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }) as typeof fetch,
+      }
+    );
+
+    assert.equal(res.statusCode, 200);
+    assert.ok(capturedHtml.includes('<tr><td align="left" style="text-align:left;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;width:100%;margin:0;'));
+    assert.ok(capturedHtml.includes('href="https://butraining.netlify.app/"'));
+    assert.ok(!capturedHtml.includes("#/?course="));
   });
 
   console.log(`\n=== All ${passed} Module 22 Offline Tests Passed ===`);

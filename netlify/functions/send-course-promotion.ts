@@ -22,7 +22,11 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Content-Type": "application/json",
+  "Cache-Control": "no-store",
 };
+
+const DEFAULT_FIREBASE_PROJECT_ID = "my-bu-app-2026-d4620";
+const DEFAULT_FIRESTORE_DATABASE_ID = "(default)";
 
 const ADMIN_EMAIL_ALLOWLIST = new Set([
   "kulachet.l@bu.ac.th",
@@ -39,11 +43,26 @@ const RATE_LIMIT_MAX_CALLS_PER_WINDOW = 12;
 // Warm-instance in-memory rate limiter (complemented by Firestore lock cooldown)
 const adminRateBuckets = new Map<string, number[]>();
 
-function getFirebaseAdmin(): { app: App; db: Firestore } | null {
+export interface PromotionHandlerDeps {
+  db?: any;
+  projectId?: string;
+  databaseId?: string;
+  verifyIdToken?: (token: string) => Promise<{ uid: string; email?: string; email_verified?: boolean }>;
+  verifyAdmin?: (db: any, uid: string, email?: string, emailVerified?: boolean) => Promise<boolean>;
+  fetchFn?: typeof fetch;
+  gasUrl?: string;
+  gasSecret?: string;
+  skipRateLimit?: boolean;
+}
+
+function getFirebaseAdmin(): { app: App; db: Firestore; projectId: string; databaseId: string } | null {
+  const projectId = (process.env.FIREBASE_PROJECT_ID || DEFAULT_FIREBASE_PROJECT_ID).trim();
+  const databaseId = (process.env.FIREBASE_FIRESTORE_DATABASE_ID || DEFAULT_FIRESTORE_DATABASE_ID).trim();
+
   const apps = getApps();
   if (apps.length > 0 && apps[0]) {
     const existing = apps[0];
-    return { app: existing, db: getFirestore(existing) };
+    return { app: existing, db: getFirestore(existing, databaseId), projectId, databaseId };
   }
 
   try {
@@ -55,10 +74,10 @@ function getFirebaseAdmin(): { app: App; db: Firestore } | null {
     } else if (
       process.env.FIREBASE_PRIVATE_KEY &&
       process.env.FIREBASE_CLIENT_EMAIL &&
-      process.env.FIREBASE_PROJECT_ID
+      (process.env.FIREBASE_PROJECT_ID || DEFAULT_FIREBASE_PROJECT_ID)
     ) {
       credential = cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
+        projectId,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
         privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
       });
@@ -76,10 +95,10 @@ function getFirebaseAdmin(): { app: App; db: Firestore } | null {
 
     const app = initializeApp({
       credential,
-      projectId: process.env.FIREBASE_PROJECT_ID || "my-bu-app-2026-d4620",
+      projectId,
     });
 
-    return { app, db: getFirestore(app) };
+    return { app, db: getFirestore(app, databaseId), projectId, databaseId };
   } catch (err) {
     console.error("Firebase Admin initialization error:", err);
     return null;
@@ -156,7 +175,8 @@ export function validatePublishedRegistrationUrl(rawUrl: unknown): {
     return { valid: false, reason: "Preview or localhost registration URLs are not allowed" };
   }
 
-  return { valid: true, normalizedUrl: parsed.toString() };
+  const cleanPath = parsed.pathname.replace(/\/+$/, "");
+  return { valid: true, normalizedUrl: `${parsed.origin}${cleanPath}/` };
 }
 
 function hasValidImageMagicBytes(buf: Buffer, mimeType: string): boolean {
@@ -494,8 +514,8 @@ function buildServerPromotionContent(params: {
     `<!DOCTYPE html><html lang="${language}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>` +
     `<body style="margin:0;padding:0;background-color:#f8fafc;font-family:'Segoe UI',Tahoma,Arial,sans-serif;color:#1e293b;">` +
     `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#f8fafc;padding:24px 12px;">` +
-    `<tr><td align="center">` +
-    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;width:100%;background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">` +
+    `<tr><td align="left" style="text-align:left;">` +
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;width:100%;margin:0;background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">` +
     testBannerHtml +
     `<tr><td style="background-color:#8b0000;padding:20px 24px;">` +
     `<p style="margin:0;font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:#fde68a;">` +
@@ -547,6 +567,13 @@ function buildServerPromotionContent(params: {
 }
 
 export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
+  return handlePromotionWithDeps(event);
+}
+
+export async function handlePromotionWithDeps(
+  event: HandlerEvent,
+  deps?: PromotionHandlerDeps
+): Promise<HandlerResponse> {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: CORS_HEADERS, body: "" };
   }
@@ -577,7 +604,15 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
   }
   const idToken = authHeader.substring(7).trim();
 
-  const fb = getFirebaseAdmin();
+  const fb = deps?.db
+    ? {
+        app: null as unknown as App,
+        db: deps.db,
+        projectId: deps.projectId || DEFAULT_FIREBASE_PROJECT_ID,
+        databaseId: deps.databaseId || DEFAULT_FIRESTORE_DATABASE_ID,
+      }
+    : getFirebaseAdmin();
+
   if (!fb) {
     return {
       statusCode: 503,
@@ -592,7 +627,9 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
 
   let decodedToken: any;
   try {
-    decodedToken = await getAuth(fb.app).verifyIdToken(idToken);
+    decodedToken = deps?.verifyIdToken
+      ? await deps.verifyIdToken(idToken)
+      : await getAuth(fb.app).verifyIdToken(idToken);
   } catch {
     return {
       statusCode: 401,
@@ -601,12 +638,9 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
     };
   }
 
-  const isAdmin = await verifyAdminCaller(
-    fb.db,
-    decodedToken.uid,
-    decodedToken.email,
-    decodedToken.email_verified
-  );
+  const isAdmin = deps?.verifyAdmin
+    ? await deps.verifyAdmin(fb.db, decodedToken.uid, decodedToken.email, decodedToken.email_verified)
+    : await verifyAdminCaller(fb.db, decodedToken.uid, decodedToken.email, decodedToken.email_verified);
 
   if (!isAdmin) {
     return {
@@ -620,7 +654,7 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
     };
   }
 
-  if (!checkInMemoryRateLimit(decodedToken.uid)) {
+  if (!deps?.skipRateLimit && !checkInMemoryRateLimit(decodedToken.uid)) {
     return {
       statusCode: 429,
       headers: CORS_HEADERS,
@@ -647,8 +681,9 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
   }
 
   const action = String(bodyData.action || "").trim();
-  const gasUrl = (process.env.GAS_PROMOTION_URL || "").trim();
-  const gasSecret = (process.env.GAS_PROMOTION_SECRET || "").trim();
+  const gasUrl = (deps?.gasUrl ?? process.env.GAS_PROMOTION_URL ?? "").trim();
+  const gasSecret = (deps?.gasSecret ?? process.env.GAS_PROMOTION_SECRET ?? "").trim();
+  const fetchFn = deps?.fetchFn || fetch;
 
   if (!gasUrl || !gasSecret) {
     return {
@@ -665,7 +700,7 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
   // --- ACTION 1: CHECK DAILY QUOTA ---
   if (action === "check_quota") {
     try {
-      const gasRes = await fetch(gasUrl, {
+      const gasRes = await fetchFn(gasUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "check_quota", secretToken: gasSecret }),
@@ -784,7 +819,7 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
     });
 
     try {
-      const gasRes = await fetch(gasUrl, {
+      const gasRes = await fetchFn(gasUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -878,40 +913,70 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
     };
   }
 
-  const campaignId = sanitizeHeaderString(bodyData.campaignId, 128).replace(/[^a-zA-Z0-9_-]/g, "_");
+  const campaignId = sanitizeHeaderString(bodyData.campaignId, 128);
   const requestedBatchSize = Math.min(
     MAX_BATCH_SIZE,
     Math.max(1, Number(bodyData.batchSize) || DEFAULT_BATCH_SIZE)
   );
 
-  if (!campaignId) {
+  if (!campaignId || campaignId.includes("/") || campaignId.includes("..")) {
     return {
       statusCode: 400,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ status: "error", code: "MISSING_CAMPAIGN_ID", message: "campaignId is required" }),
+      body: JSON.stringify({
+        status: "error",
+        code: "MISSING_CAMPAIGN_ID",
+        message: "Valid campaignId is required",
+      }),
     };
   }
 
   const campaignRef = fb.db.collection("promotion_campaigns").doc(campaignId);
   const campaignSnap = await campaignRef.get();
   if (!campaignSnap.exists) {
+    console.warn(
+      `[send-course-promotion] CAMPAIGN_NOT_FOUND project=${fb.projectId} db=${fb.databaseId} campaignId=${campaignId}`
+    );
     return {
       statusCode: 404,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ status: "error", code: "CAMPAIGN_NOT_FOUND", message: "Promotion campaign not found" }),
+      body: JSON.stringify({
+        status: "error",
+        code: "CAMPAIGN_NOT_FOUND",
+        message: `ไม่พบแคมเปญในฐานข้อมูล (campaignId: ${campaignId}, db: ${fb.databaseId})`,
+      }),
     };
   }
 
   const campaignData = campaignSnap.data() || {};
-  const courseId = String(campaignData.courseId || "");
+  const courseId = String(campaignData.courseId || "").trim();
   const language: "th" | "en" = campaignData.language === "en" ? "en" : "th";
 
-  const courseSnap = await fb.db.collection("courses").doc(courseId).get();
-  if (!courseSnap.exists) {
+  if (!courseId || courseId.includes("/") || courseId.includes("..")) {
     return {
       statusCode: 404,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ status: "error", code: "COURSE_NOT_FOUND", message: "Target course does not exist" }),
+      body: JSON.stringify({
+        status: "error",
+        code: "COURSE_NOT_FOUND",
+        message: "Campaign document is missing a valid courseId",
+      }),
+    };
+  }
+
+  const courseSnap = await fb.db.collection("courses").doc(courseId).get();
+  if (!courseSnap.exists) {
+    console.warn(
+      `[send-course-promotion] COURSE_NOT_FOUND project=${fb.projectId} db=${fb.databaseId} campaignId=${campaignId} courseId=${courseId}`
+    );
+    return {
+      statusCode: 404,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        status: "error",
+        code: "COURSE_NOT_FOUND",
+        message: `ไม่พบหลักสูตรเป้าหมายในฐานข้อมูล (courseId: ${courseId})`,
+      }),
     };
   }
   const courseData = courseSnap.data() || {};
@@ -956,14 +1021,14 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
   // Fetch authoritative suppression list from Firestore so suppressed recipients are NEVER emailed
   const suppressionSnap = await fb.db.collection("promotion_suppressions").get();
   const suppressedEmails = new Set<string>();
-  suppressionSnap.docs.forEach((d) => {
+  suppressionSnap.docs.forEach((d: any) => {
     const email = String(d.data()?.email || "").trim().toLowerCase();
     if (email) suppressedEmails.add(email);
   });
 
   // Acquire campaign batch lock & claim up to `requestedBatchSize` confirmed `pending` recipients transactionally
   const recipientsColl = campaignRef.collection("recipients");
-  const batchLockResult = await fb.db.runTransaction(async (tx) => {
+  const batchLockResult = await fb.db.runTransaction(async (tx: any) => {
     const cSnap = await tx.get(campaignRef);
     const cData = cSnap.data() || {};
     const lockUntil = cData.activeLockUntil ? new Date(cData.activeLockUntil).getTime() : 0;
@@ -1051,203 +1116,263 @@ export async function handler(event: HandlerEvent): Promise<HandlerResponse> {
   let skippedCountDelta = 0;
   let remainingDailyQuota: number | null = null;
   let quotaExhausted = false;
+  let preSendRejectedCode = "";
   let lastBatchError = "";
 
-  if (claimed.length > 0) {
-    const messages = claimed.map((rec) => {
-      const rendered = buildServerPromotionContent({
-        course: courseData,
-        template,
-        language,
-        registrationUrl: regCheck.normalizedUrl!,
-        recipientName: rec.name,
-        posterSrc,
-        isTest: false,
-      });
-      return {
-        recipientId: rec.id,
-        to: rec.email,
-        subject: rendered.subject,
-        textBody: rendered.textBody,
-        htmlBody: rendered.htmlBody,
-      };
+  const recomputeAndFinalizeCampaign = async (errNote?: string) => {
+    const allRecipientsSnap = await recipientsColl.get();
+    let totalSent = 0;
+    let totalFailed = 0;
+    let totalPending = 0;
+    let totalUnknown = 0;
+    let totalSkipped = 0;
+
+    allRecipientsSnap.docs.forEach((d: any) => {
+      const s = String(d.data()?.status || "pending");
+      if (s === "sent") totalSent++;
+      else if (s === "failed") totalFailed++;
+      else if (s === "unknown" || s === "processing") totalUnknown++;
+      else if (s === "skipped") totalSkipped++;
+      else totalPending++;
     });
 
-    const senderName =
-      language === "en"
-        ? "Learning Development Office (LDO)"
-        : "สำนักพัฒนาการเรียนรู้ (LDO) มหาวิทยาลัยกรุงเทพ";
-
-    let gasRes: Response | null = null;
-    let gasJson: any = null;
-    try {
-      gasRes = await fetch(gasUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "send_course_promotion",
-          secretToken: gasSecret,
-          isTest: false,
-          campaignId,
-          language,
-          senderName,
-          poster:
-            posterCheck.mode === "inline_cid"
-              ? {
-                  mode: "inline_cid",
-                  cidName: "coursePoster",
-                  mimeType: posterCheck.inlineMimeType,
-                  filename: posterCheck.inlineFilename,
-                  base64: posterCheck.inlineBase64,
-                }
-              : undefined,
-          messages,
-        }),
-        redirect: "follow",
-      });
-      gasJson = await gasRes.json().catch(() => null);
-    } catch (err: any) {
-      lastBatchError = `GAS network/timeout: ${err?.message || String(err)}`;
+    let nextCampaignStatus = "paused";
+    if (totalPending === 0) {
+      nextCampaignStatus = totalFailed > 0 || totalUnknown > 0 ? "completed_with_issues" : "completed";
     }
 
-    const nowIso = new Date().toISOString();
-    const updateBatch = fb.db.batch();
+    const nowDone = new Date().toISOString();
+    await campaignRef.update({
+      status: nextCampaignStatus,
+      registrationUrl: regCheck.normalizedUrl,
+      activeLockUntil: "",
+      totalRecipients: allRecipientsSnap.docs.length,
+      sentCount: totalSent,
+      failedCount: totalFailed,
+      pendingCount: totalPending,
+      unknownCount: totalUnknown,
+      skippedCount: totalSkipped,
+      remainingQuota: remainingDailyQuota,
+      lastProcessedAt: nowDone,
+      ...(errNote ? { lastBatchError: errNote } : {}),
+      updatedAt: nowDone,
+    });
 
-    if (!gasRes || !gasRes.ok || !gasJson) {
-      // Request timed out or upstream returned non-JSON after send attempt -> mark recipients UNKNOWN (never blindly resend)
-      for (const rec of claimed) {
-        updateBatch.update(rec.ref, {
-          status: "unknown",
-          error: lastBatchError || `Upstream HTTP ${gasRes?.status || 504} — explicit Admin review required`,
-          updatedAt: nowIso,
+    return {
+      totalSent,
+      totalFailed,
+      totalPending,
+      totalUnknown,
+      totalSkipped,
+      nextCampaignStatus,
+    };
+  };
+
+  try {
+    if (claimed.length > 0) {
+      const messages = claimed.map((rec: any) => {
+        const rendered = buildServerPromotionContent({
+          course: courseData,
+          template,
+          language,
+          registrationUrl: regCheck.normalizedUrl!,
+          recipientName: rec.name,
+          posterSrc,
+          isTest: false,
         });
-        unknownCountDelta++;
-      }
-    } else if (gasJson.status === "error" && (!Array.isArray(gasJson.results) || gasJson.results.length === 0)) {
-      // Complete pre-send rejection (e.g. bad GAS secret, quota 0 before first send, lock timeout)
-      const isQuotaError = gasJson.code === "QUOTA_EXHAUSTED";
-      if (isQuotaError) quotaExhausted = true;
-      lastBatchError = gasJson.message || "GAS rejected batch before sending";
-      for (const rec of claimed) {
-        // Revert to pending safely since zero emails were attempted!
-        updateBatch.update(rec.ref, {
-          status: "pending",
-          error: lastBatchError,
-          updatedAt: nowIso,
+        return {
+          recipientId: rec.id,
+          to: rec.email,
+          subject: rendered.subject,
+          textBody: rendered.textBody,
+          htmlBody: rendered.htmlBody,
+        };
+      });
+
+      const senderName =
+        language === "en"
+          ? "Learning Development Office (LDO)"
+          : "สำนักพัฒนาการเรียนรู้ (LDO) มหาวิทยาลัยกรุงเทพ";
+
+      let gasRes: Response | null = null;
+      let gasJson: any = null;
+      try {
+        gasRes = await fetchFn(gasUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "send_course_promotion",
+            secretToken: gasSecret,
+            isTest: false,
+            campaignId,
+            language,
+            senderName,
+            poster:
+              posterCheck.mode === "inline_cid"
+                ? {
+                    mode: "inline_cid",
+                    cidName: "coursePoster",
+                    mimeType: posterCheck.inlineMimeType,
+                    filename: posterCheck.inlineFilename,
+                    base64: posterCheck.inlineBase64,
+                  }
+                : undefined,
+            messages,
+          }),
+          redirect: "follow",
         });
-      }
-    } else {
-      remainingDailyQuota =
-        typeof gasJson.remainingDailyQuota === "number" ? gasJson.remainingDailyQuota : null;
-      quotaExhausted = Boolean(gasJson.quotaExhausted);
-
-      const resultsMap = new Map<string, any>();
-      if (Array.isArray(gasJson.results)) {
-        for (const resItem of gasJson.results) {
-          if (resItem?.recipientId) resultsMap.set(String(resItem.recipientId), resItem);
-        }
+        gasJson = await gasRes.json().catch(() => null);
+      } catch (err: any) {
+        lastBatchError = `GAS network/timeout: ${err?.message || String(err)}`;
       }
 
-      for (const rec of claimed) {
-        const outcome = resultsMap.get(rec.id);
-        if (!outcome) {
+      const nowIso = new Date().toISOString();
+      const updateBatch = fb.db.batch();
+
+      if (!gasRes || !gasRes.ok || !gasJson) {
+        // Request timed out or upstream returned non-JSON/error after send attempt -> mark claimed recipients UNKNOWN (never blindly resend)
+        lastBatchError =
+          lastBatchError ||
+          `Upstream GAS gateway error (HTTP ${gasRes?.status || 502}) — explicit Admin review required`;
+        for (const rec of claimed) {
           updateBatch.update(rec.ref, {
             status: "unknown",
-            error: "No confirmation returned by GAS for this recipient — review required",
+            error: lastBatchError,
             updatedAt: nowIso,
           });
           unknownCountDelta++;
-        } else if (outcome.status === "sent") {
-          updateBatch.update(rec.ref, {
-            status: "sent",
-            sentAt: outcome.sentAt || nowIso,
-            error: "",
-            updatedAt: nowIso,
-          });
-          sentCountDelta++;
-        } else if (outcome.status === "unattempted") {
-          // Stopped cleanly before sending (quota exhausted or GAS time budget): return safely to pending
+        }
+      } else if (gasJson.status === "error" && (!Array.isArray(gasJson.results) || gasJson.results.length === 0)) {
+        // Complete pre-send rejection (e.g. bad GAS secret, quota 0 before first send, lock timeout)
+        const isQuotaError = gasJson.code === "QUOTA_EXHAUSTED";
+        if (isQuotaError) quotaExhausted = true;
+        else preSendRejectedCode = String(gasJson.code || "UPSTREAM_ERROR");
+        lastBatchError = gasJson.message || "GAS rejected batch before sending";
+        for (const rec of claimed) {
+          // Revert only newly claimed recipients to pending safely since zero emails were attempted!
           updateBatch.update(rec.ref, {
             status: "pending",
-            error: outcome.error || "Paused prior to send attempt (resumable)",
+            error: lastBatchError,
             updatedAt: nowIso,
           });
-        } else if (outcome.status === "skipped") {
-          updateBatch.update(rec.ref, {
-            status: "skipped",
-            error: outcome.error || "Skipped by mail service",
-            updatedAt: nowIso,
-          });
-          skippedCountDelta++;
-        } else {
-          updateBatch.update(rec.ref, {
-            status: "failed",
-            error: outcome.error || "Failed to send via MailApp",
-            updatedAt: nowIso,
-          });
-          failedCountDelta++;
+        }
+      } else {
+        remainingDailyQuota =
+          typeof gasJson.remainingDailyQuota === "number" ? gasJson.remainingDailyQuota : null;
+        quotaExhausted = Boolean(gasJson.quotaExhausted);
+
+        const resultsMap = new Map<string, any>();
+        if (Array.isArray(gasJson.results)) {
+          for (const resItem of gasJson.results) {
+            if (resItem?.recipientId) resultsMap.set(String(resItem.recipientId), resItem);
+          }
+        }
+
+        for (const rec of claimed) {
+          const outcome = resultsMap.get(rec.id);
+          if (!outcome) {
+            updateBatch.update(rec.ref, {
+              status: "unknown",
+              error: "No confirmation returned by GAS for this recipient — review required",
+              updatedAt: nowIso,
+            });
+            unknownCountDelta++;
+          } else if (outcome.status === "sent") {
+            updateBatch.update(rec.ref, {
+              status: "sent",
+              sentAt: outcome.sentAt || nowIso,
+              error: "",
+              updatedAt: nowIso,
+            });
+            sentCountDelta++;
+          } else if (outcome.status === "unattempted") {
+            // Stopped cleanly before sending (quota exhausted or GAS time budget): return safely to pending
+            updateBatch.update(rec.ref, {
+              status: "pending",
+              error: outcome.error || "Paused prior to send attempt (resumable)",
+              updatedAt: nowIso,
+            });
+          } else if (outcome.status === "skipped") {
+            updateBatch.update(rec.ref, {
+              status: "skipped",
+              error: outcome.error || "Skipped by mail service",
+              updatedAt: nowIso,
+            });
+            skippedCountDelta++;
+          } else {
+            updateBatch.update(rec.ref, {
+              status: "failed",
+              error: outcome.error || "Failed to send via MailApp",
+              updatedAt: nowIso,
+            });
+            failedCountDelta++;
+          }
         }
       }
+
+      await updateBatch.commit();
     }
 
-    await updateBatch.commit();
+    const summary = await recomputeAndFinalizeCampaign(lastBatchError || undefined);
+    const hasAmbiguousBatchFailure =
+      claimed.length > 0 && unknownCountDelta === claimed.length && Boolean(lastBatchError);
+    const hasPreSendUpstreamError = Boolean(preSendRejectedCode);
+
+    return {
+      statusCode: hasAmbiguousBatchFailure || hasPreSendUpstreamError ? 502 : 200,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        status: hasAmbiguousBatchFailure || hasPreSendUpstreamError ? "error" : "success",
+        ...(hasAmbiguousBatchFailure
+          ? { code: "UPSTREAM_ERROR" }
+          : hasPreSendUpstreamError
+          ? { code: preSendRejectedCode }
+          : {}),
+        processedCount: claimed.length,
+        sentCount: sentCountDelta,
+        failedCount: failedCountDelta,
+        unknownCount: unknownCountDelta,
+        skippedCount: skippedCountDelta,
+        remainingPending: summary.totalPending,
+        remainingDailyQuota,
+        quotaExhausted,
+        campaignStatus: summary.nextCampaignStatus,
+        message: quotaExhausted
+          ? "โควตาการส่งอีเมลรายวันของ Google Apps Script หมดแล้ว ระบบหยุดชั่วคราวโดยคงผู้รับที่เหลือเป็น Pending เพื่อส่งต่อได้ภายหลัง"
+          : lastBatchError || "ประมวลผลชุดข้อมูลเรียบร้อยแล้ว",
+      }),
+    };
+  } catch (err: any) {
+    // Unexpected post-claim failure: never reset claimed processing rows to pending; mark Unknown and release lock
+    const errMsg = err?.message || "Unexpected server error after claiming recipients";
+    const nowErr = new Date().toISOString();
+    try {
+      if (claimed.length > 0) {
+        const rescueBatch = fb.db.batch();
+        for (const rec of claimed) {
+          rescueBatch.update(rec.ref, {
+            status: "unknown",
+            error: `Post-claim server error (${errMsg}) — explicit Admin review required`,
+            updatedAt: nowErr,
+          });
+        }
+        await rescueBatch.commit();
+      }
+      await recomputeAndFinalizeCampaign(errMsg);
+    } catch (rescueErr) {
+      console.error("[send-course-promotion] Rescue lock release error:", rescueErr);
+    }
+
+    return {
+      statusCode: 502,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        status: "error",
+        code: "UPSTREAM_ERROR",
+        processedCount: claimed.length,
+        unknownCount: claimed.length,
+        message: `เกิดข้อผิดพลาดระหว่างจัดส่งชุดข้อมูล (${errMsg}) — ผู้รับในชุดนี้ถูกทำเครื่องหมายเป็น Unknown เพื่อป้องกันการส่งซ้ำ`,
+      }),
+    };
   }
-
-  // Recompute authoritative aggregate counts cleanly & release lock
-  const allRecipientsSnap = await recipientsColl.get();
-  let totalSent = 0;
-  let totalFailed = 0;
-  let totalPending = 0;
-  let totalUnknown = 0;
-  let totalSkipped = 0;
-
-  allRecipientsSnap.docs.forEach((d) => {
-    const s = String(d.data()?.status || "pending");
-    if (s === "sent") totalSent++;
-    else if (s === "failed") totalFailed++;
-    else if (s === "unknown" || s === "processing") totalUnknown++;
-    else if (s === "skipped") totalSkipped++;
-    else totalPending++;
-  });
-
-  let nextCampaignStatus = "paused";
-  if (totalPending === 0) {
-    nextCampaignStatus = totalFailed > 0 || totalUnknown > 0 ? "completed_with_issues" : "completed";
-  }
-
-  const nowDone = new Date().toISOString();
-  await campaignRef.update({
-    status: nextCampaignStatus,
-    activeLockUntil: "",
-    totalRecipients: allRecipientsSnap.docs.length,
-    sentCount: totalSent,
-    failedCount: totalFailed,
-    pendingCount: totalPending,
-    unknownCount: totalUnknown,
-    skippedCount: totalSkipped,
-    remainingQuota: remainingDailyQuota,
-    lastProcessedAt: nowDone,
-    ...(lastBatchError ? { lastBatchError } : {}),
-    updatedAt: nowDone,
-  });
-
-  return {
-    statusCode: lastBatchError && unknownCountDelta === claimed.length ? 504 : 200,
-    headers: CORS_HEADERS,
-    body: JSON.stringify({
-      status: lastBatchError && claimed.length === 0 ? "error" : "success",
-      processedCount: claimed.length,
-      sentCount: sentCountDelta,
-      failedCount: failedCountDelta,
-      unknownCount: unknownCountDelta,
-      skippedCount: skippedCountDelta,
-      remainingPending: totalPending,
-      remainingDailyQuota,
-      quotaExhausted,
-      campaignStatus: nextCampaignStatus,
-      message: quotaExhausted
-        ? "โควตาการส่งอีเมลรายวันของ Google Apps Script หมดแล้ว ระบบหยุดชั่วคราวโดยคงผู้รับที่เหลือเป็น Pending เพื่อส่งต่อได้ภายหลัง"
-        : lastBatchError || "ประมวลผลชุดข้อมูลเรียบร้อยแล้ว",
-    }),
-  };
 }

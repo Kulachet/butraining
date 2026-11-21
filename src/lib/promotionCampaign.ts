@@ -39,7 +39,8 @@ export type RecipientSource = "paste" | "csv" | "instructor";
 
 export type PosterMode = "course_url" | "custom_url" | "inline_cid" | "none";
 
-export const PROMOTION_GATEWAY_ENDPOINT = "/.netlify/functions/send-course-promotion";
+export const PROMOTION_GATEWAY_ENDPOINT = "/api/send-course-promotion";
+export const PROMOTION_GATEWAY_FALLBACK_ENDPOINT = "/.netlify/functions/send-course-promotion";
 export const DEFAULT_PROMOTION_BATCH_SIZE = 20;
 export const MAX_PROMOTION_BATCH_SIZE = 25;
 export const MAX_POSTER_BYTES = 800 * 1024; // 800 KB raw decoded limit for CID inline image
@@ -782,6 +783,10 @@ export function renderPromotionEmail(params: {
     ? (template.customDescription !== undefined ? template.customDescription : course.description || "").trim()
     : "";
 
+  const normalizedRegUrl = validatePublicAppUrl(registrationUrl).valid
+    ? buildCourseRegistrationUrl(registrationUrl)
+    : registrationUrl;
+
   const safeTitle = escapeHtml(courseTitle);
   const safeGreeting = escapeHtml(greetingLine);
   const safeHeadline = escapeHtml(template.headline);
@@ -789,7 +794,7 @@ export function renderPromotionEmail(params: {
   const safeDescription = escapeHtml(descriptionText).replace(/\n/g, "<br>");
   const safeSpeaker = escapeHtml(speakerText);
   const safeCtaLabel = escapeHtml(template.ctaLabel || (isEn ? "Register Now" : "ลงทะเบียนเข้าอบรม"));
-  const safeRegUrl = escapeHtml(registrationUrl);
+  const safeRegUrl = escapeHtml(normalizedRegUrl);
   const safeSigTitle = escapeHtml(template.signatureTitle);
   const safeSigOrg = escapeHtml(template.signatureOrg);
   const safeFooter = escapeHtml(template.footerNote);
@@ -829,8 +834,8 @@ export function renderPromotionEmail(params: {
     `<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>` +
     `<body style="margin:0;padding:0;background-color:#f8fafc;font-family:'Segoe UI',Tahoma,Arial,sans-serif;color:#1e293b;">` +
     `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#f8fafc;padding:24px 12px;">` +
-    `<tr><td align="center">` +
-    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;width:100%;background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">` +
+    `<tr><td align="left" style="text-align:left;">` +
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;width:100%;margin:0;background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">` +
     testBannerHtml +
     `<tr><td style="background-color:#8b0000;padding:20px 24px;">` +
     `<p style="margin:0;font-size:11px;font-weight:bold;letter-spacing:1.2px;text-transform:uppercase;color:#fde68a;">` +
@@ -886,7 +891,7 @@ export function renderPromotionEmail(params: {
     (descriptionText ? `${isEn ? "Course Overview" : "รายละเอียดหลักสูตร"}:\n${descriptionText}\n\n` : "") +
     (speakerText ? `${isEn ? "Speaker" : "วิทยากร"}: ${speakerText}\n` : "") +
     `${schedulePlainLines}\n\n` +
-    `${template.ctaLabel || (isEn ? "Register Now" : "ลงทะเบียนเข้าอบรม")}:\n${registrationUrl}\n\n` +
+    `${template.ctaLabel || (isEn ? "Register Now" : "ลงทะเบียนเข้าอบรม")}:\n${normalizedRegUrl}\n\n` +
     `${template.signatureTitle}\n${template.signatureOrg}\n\n` +
     `---\n${template.footerNote}`;
 
@@ -903,14 +908,11 @@ export function renderPromotionEmail(params: {
 }
 
 /**
- * Resolves the safe registration link using `appUrl.ts` so preview/localhost URLs are blocked.
+ * Resolves the safe homepage registration link (`https://butraining.netlify.app/`) using `appUrl.ts`
+ * so preview/localhost URLs are blocked and no course-specific hash or query parameters are added.
  */
-export function buildCampaignRegistrationLink(baseUrl: string, courseId: string): string {
-  const urlCheck = validatePublicAppUrl(baseUrl);
-  if (!urlCheck.valid) {
-    throw new Error(urlCheck.reason || "Invalid published public application URL");
-  }
-  return buildCourseRegistrationUrl(baseUrl, courseId);
+export function buildCampaignRegistrationLink(baseUrl: string, _courseId?: string): string {
+  return buildCourseRegistrationUrl(baseUrl);
 }
 
 /**
@@ -950,31 +952,100 @@ export function generateCampaignResultsCsv(
   };
 }
 
-export async function fetchPromotionQuota(idToken: string): Promise<{
+function extractSafeErrorMessage(json: any, status: number, rawText: string, defaultMsg: string): string {
+  if (json && typeof json.message === "string" && json.message.trim()) {
+    return json.message.trim();
+  }
+  const contentPreview = rawText ? rawText.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 140) : "";
+  if (status === 404) {
+    return `ไม่พบปลายทาง Promotion Gateway (HTTP 404)${contentPreview ? ` — ${contentPreview}` : ""}`;
+  }
+  return `${defaultMsg} (HTTP ${status})${contentPreview ? ` — ${contentPreview}` : ""}`;
+}
+
+async function postPromotionGateway(params: {
+  idToken: string;
+  payload: Record<string, unknown>;
+  fetchImpl?: typeof fetch;
+}): Promise<{
+  res: Response;
+  json: any;
+  rawText: string;
+  endpointUsed: string;
+  isNonJsonRouting404: boolean;
+}> {
+  const fetcher = params.fetchImpl || fetch;
+  const doPost = async (endpoint: string) => {
+    const res = await fetcher(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${params.idToken}`,
+      },
+      body: JSON.stringify(params.payload),
+    });
+    const rawText = await res.text().catch(() => "");
+    let json: any = null;
+    if (rawText) {
+      try {
+        json = JSON.parse(rawText);
+      } catch {
+        json = null;
+      }
+    }
+    const contentType = (res.headers?.get?.("content-type") || "").toLowerCase();
+    const isHtmlFallback =
+      contentType.includes("text/html") || /^\s*<(?:!doctype|html)\b/i.test(rawText);
+    const isNonJsonRouting404 =
+      (!json && res.status === 404) || (!json && res.status === 200 && isHtmlFallback);
+    return { res, json, rawText, endpointUsed: endpoint, isNonJsonRouting404 };
+  };
+
+  const primary = await doPost(PROMOTION_GATEWAY_ENDPOINT);
+  // Only fall back to direct /.netlify/functions/* path if /api/* clearly never reached the function (non-JSON 404 or SPA HTML)
+  if (primary.isNonJsonRouting404) {
+    return await doPost(PROMOTION_GATEWAY_FALLBACK_ENDPOINT);
+  }
+  return primary;
+}
+
+export async function fetchPromotionQuota(
+  idToken: string,
+  fetchImpl?: typeof fetch
+): Promise<{
   ok: boolean;
+  httpStatus?: number;
+  code?: string;
   remainingDailyQuota?: number | null;
   message?: string;
 }> {
   try {
-    const res = await fetch(PROMOTION_GATEWAY_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify({ action: "check_quota" }),
+    const { res, json, rawText, isNonJsonRouting404 } = await postPromotionGateway({
+      idToken,
+      payload: { action: "check_quota" },
+      fetchImpl,
     });
-    const json = await res.json().catch(() => null);
-    if (!res.ok || !json) {
-      return { ok: false, message: json?.message || `HTTP ${res.status}` };
+    if (!res.ok || !json || json.status === "error") {
+      const code = isNonJsonRouting404
+        ? "ENDPOINT_NOT_FOUND"
+        : typeof json?.code === "string"
+        ? json.code
+        : undefined;
+      return {
+        ok: false,
+        httpStatus: isNonJsonRouting404 && res.status === 200 ? 404 : res.status,
+        code,
+        message: extractSafeErrorMessage(json, isNonJsonRouting404 && res.status === 200 ? 404 : res.status, rawText, "ไม่สามารถตรวจสอบโควตาการส่งอีเมลได้"),
+      };
     }
     return {
       ok: true,
+      httpStatus: res.status,
       remainingDailyQuota: typeof json.remainingDailyQuota === "number" ? json.remainingDailyQuota : null,
       message: json.message,
     };
   } catch (err: any) {
-    return { ok: false, message: err?.message || "Network error checking MailApp quota" };
+    return { ok: false, code: "NETWORK_ERROR", message: err?.message || "Network error checking MailApp quota" };
   }
 }
 
@@ -988,49 +1059,65 @@ export async function sendPromotionTestEmail(params: {
   registrationUrl: string;
   template: PromotionTemplateData;
   poster: PosterConfig;
-}): Promise<{ ok: boolean; message: string; remainingDailyQuota?: number | null }> {
-  const res = await fetch(PROMOTION_GATEWAY_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${params.idToken}`,
-    },
-    body: JSON.stringify({
-      action: "send_test",
-      courseId: params.courseId,
-      campaignId: params.campaignId || "",
-      testEmail: normalizeEmailAddress(params.testEmail),
-      testName: (params.testName || "").trim(),
-      language: params.language,
-      registrationUrl: params.registrationUrl,
-      template: params.template,
-      poster: {
-        mode: params.poster.mode,
-        publicUrl: params.poster.publicUrl,
-        inlineBase64: params.poster.inlineBase64,
-        inlineMimeType: params.poster.inlineMimeType,
-        inlineFilename: params.poster.inlineFilename,
+  fetchImpl?: typeof fetch;
+}): Promise<{ ok: boolean; httpStatus?: number; code?: string; message: string; remainingDailyQuota?: number | null }> {
+  try {
+    const { res, json, rawText, isNonJsonRouting404 } = await postPromotionGateway({
+      idToken: params.idToken,
+      fetchImpl: params.fetchImpl,
+      payload: {
+        action: "send_test",
+        courseId: params.courseId,
+        campaignId: params.campaignId || "",
+        testEmail: normalizeEmailAddress(params.testEmail),
+        testName: (params.testName || "").trim(),
+        language: params.language,
+        registrationUrl: params.registrationUrl,
+        template: params.template,
+        poster: {
+          mode: params.poster.mode,
+          publicUrl: params.poster.publicUrl,
+          inlineBase64: params.poster.inlineBase64,
+          inlineMimeType: params.poster.inlineMimeType,
+          inlineFilename: params.poster.inlineFilename,
+        },
       },
-    }),
-  });
+    });
 
-  const json = await res.json().catch(() => null);
-  if (!res.ok || !json || json.status === "error") {
+    const effectiveStatus = isNonJsonRouting404 && res.status === 200 ? 404 : res.status;
+    if (!res.ok || !json || json.status === "error") {
+      const code = isNonJsonRouting404
+        ? "ENDPOINT_NOT_FOUND"
+        : typeof json?.code === "string"
+        ? json.code
+        : undefined;
+      return {
+        ok: false,
+        httpStatus: effectiveStatus,
+        code,
+        message: extractSafeErrorMessage(json, effectiveStatus, rawText, "ส่งอีเมลทดสอบไม่สำเร็จ"),
+      };
+    }
+    return {
+      ok: true,
+      httpStatus: res.status,
+      message: json.message || "ส่งอีเมลทดสอบ [TEST] เรียบร้อยแล้ว",
+      remainingDailyQuota: typeof json.remainingDailyQuota === "number" ? json.remainingDailyQuota : null,
+    };
+  } catch (err: any) {
     return {
       ok: false,
-      message: json?.message || `ส่งอีเมลทดสอบไม่สำเร็จ (HTTP ${res.status})`,
+      code: "NETWORK_ERROR",
+      message: err?.message || "ไม่สามารถติดต่อ Promotion Gateway สำหรับส่งอีเมลทดสอบได้",
     };
   }
-  return {
-    ok: true,
-    message: json.message || "ส่งอีเมลทดสอบ [TEST] เรียบร้อยแล้ว",
-    remainingDailyQuota: typeof json.remainingDailyQuota === "number" ? json.remainingDailyQuota : null,
-  };
 }
 
 export interface BatchDispatchResponse {
   ok: boolean;
+  httpStatus?: number;
   code?: string;
+  outcomeAmbiguous?: boolean;
   message: string;
   processedCount?: number;
   sentCount?: number;
@@ -1048,50 +1135,75 @@ export async function dispatchPromotionBatch(params: {
   campaignId: string;
   batchSize?: number;
   poster?: PosterConfig;
+  fetchImpl?: typeof fetch;
 }): Promise<BatchDispatchResponse> {
-  const res = await fetch(PROMOTION_GATEWAY_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${params.idToken}`,
-    },
-    body: JSON.stringify({
-      action: "dispatch_batch",
-      campaignId: params.campaignId,
-      batchSize: Math.min(MAX_PROMOTION_BATCH_SIZE, Math.max(1, params.batchSize || DEFAULT_PROMOTION_BATCH_SIZE)),
-      poster: params.poster
-        ? {
-            mode: params.poster.mode,
-            publicUrl: params.poster.publicUrl,
-            inlineBase64: params.poster.inlineBase64,
-            inlineMimeType: params.poster.inlineMimeType,
-            inlineFilename: params.poster.inlineFilename,
-          }
-        : undefined,
-    }),
-  });
+  try {
+    const { res, json, rawText, isNonJsonRouting404 } = await postPromotionGateway({
+      idToken: params.idToken,
+      fetchImpl: params.fetchImpl,
+      payload: {
+        action: "dispatch_batch",
+        campaignId: params.campaignId,
+        batchSize: Math.min(MAX_PROMOTION_BATCH_SIZE, Math.max(1, params.batchSize || DEFAULT_PROMOTION_BATCH_SIZE)),
+        poster: params.poster
+          ? {
+              mode: params.poster.mode,
+              publicUrl: params.poster.publicUrl,
+              inlineBase64: params.poster.inlineBase64,
+              inlineMimeType: params.poster.inlineMimeType,
+              inlineFilename: params.poster.inlineFilename,
+            }
+          : undefined,
+      },
+    });
 
-  const json = await res.json().catch(() => null);
-  if (!json) {
+    if (isNonJsonRouting404) {
+      return {
+        ok: false,
+        httpStatus: 404,
+        code: "ENDPOINT_NOT_FOUND",
+        outcomeAmbiguous: false,
+        message:
+          "ไม่พบปลายทางส่งอีเมลประชาสัมพันธ์บนเซิร์ฟเวอร์ (HTTP 404 — Function Endpoint Not Found) กรุณาตรวจสอบการ deploy ฟังก์ชัน Netlify ก่อนลองใหม่",
+      };
+    }
+
+    if (!json) {
+      return {
+        ok: false,
+        httpStatus: res.status,
+        code: res.status >= 500 ? "UPSTREAM_ERROR" : "AMBIGUOUS_RESPONSE",
+        outcomeAmbiguous: true,
+        message: `เซิร์ฟเวอร์ตอบกลับไม่สมบูรณ์ (HTTP ${res.status}) — สถานะการจัดส่งยังไม่แน่ชัด (Unknown) กรุณาตรวจสอบรายชื่อผู้รับในระบบก่อนส่งซ้ำ${rawText ? "" : ""}`,
+      };
+    }
+
+    const ok = res.ok && json.status !== "error";
+    const unknownCount = typeof json.unknownCount === "number" ? json.unknownCount : undefined;
+    const outcomeAmbiguous = Boolean(!ok && (json.code === "UPSTREAM_ERROR" || json.code === "GAS_TIMEOUT" || (unknownCount ?? 0) > 0));
+
+    return {
+      ok,
+      httpStatus: res.status,
+      code: typeof json.code === "string" ? json.code : !ok ? `HTTP_${res.status}` : undefined,
+      outcomeAmbiguous,
+      message: json.message || (ok ? "ส่งชุดข้อมูลเรียบร้อยแล้ว" : `การส่งชุดข้อมูลขัดข้อง (HTTP ${res.status})`),
+      processedCount: json.processedCount,
+      sentCount: json.sentCount,
+      failedCount: json.failedCount,
+      unknownCount,
+      skippedCount: json.skippedCount,
+      remainingPending: json.remainingPending,
+      remainingDailyQuota: typeof json.remainingDailyQuota === "number" ? json.remainingDailyQuota : null,
+      campaignStatus: json.campaignStatus,
+      quotaExhausted: Boolean(json.quotaExhausted),
+    };
+  } catch (err: any) {
     return {
       ok: false,
-      code: "AMBIGUOUS_RESPONSE",
-      message: `เซิร์ฟเวอร์ตอบกลับไม่สมบูรณ์ (HTTP ${res.status}) — กรุณาตรวจสอบสถานะผู้รับในแดชบอร์ดก่อนส่งต่อ`,
+      code: "UPSTREAM_ERROR",
+      outcomeAmbiguous: true,
+      message: `การเชื่อมต่อขาดหายระหว่างส่งชุดข้อมูล (${err?.message || "Network timeout"}) — สถานะการจัดส่งอาจเป็น Unknown กรุณาตรวจสอบสถานะผู้รับในแดชบอร์ดก่อนส่งต่อ`,
     };
   }
-
-  return {
-    ok: res.ok && json.status !== "error",
-    code: json.code,
-    message: json.message || (res.ok ? "ส่งชุดข้อมูลเรียบร้อยแล้ว" : "การส่งชุดข้อมูลขัดข้อง"),
-    processedCount: json.processedCount,
-    sentCount: json.sentCount,
-    failedCount: json.failedCount,
-    unknownCount: json.unknownCount,
-    skippedCount: json.skippedCount,
-    remainingPending: json.remainingPending,
-    remainingDailyQuota: typeof json.remainingDailyQuota === "number" ? json.remainingDailyQuota : null,
-    campaignStatus: json.campaignStatus,
-    quotaExhausted: Boolean(json.quotaExhausted),
-  };
 }

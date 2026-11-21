@@ -12,6 +12,7 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import {
+  buildCampaignRegistrationLink,
   buildSuppressionDocId,
   CampaignLanguage,
   CampaignStatus,
@@ -77,7 +78,7 @@ export function buildFirestoreCampaignRecord(params: {
     language: params.language,
     subject: params.template.subject.trim().slice(0, 300),
     template: params.template,
-    registrationUrl: params.registrationUrl.trim().slice(0, 1000),
+    registrationUrl: buildCampaignRegistrationLink(params.registrationUrl).slice(0, 1000),
     posterMode: params.poster.mode,
     ...(params.poster.publicUrl ? { posterUrl: params.poster.publicUrl } : {}),
     ...(posterMeta ? { posterMeta } : {}),
@@ -158,6 +159,22 @@ export async function getPromotionCampaign(campaignId: string): Promise<Promotio
 export async function listCampaignRecipients(campaignId: string): Promise<PromotionRecipientDoc[]> {
   const snap = await getDocs(collection(db, CAMPAIGNS_COLLECTION, campaignId, "recipients"));
   return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as PromotionRecipientDoc[];
+}
+
+/**
+ * Updates an existing draft/ready/paused campaign's registrationUrl to the corrected homepage URL
+ * for future dispatches without altering any historical sent recipient records.
+ */
+export async function updateCampaignRegistrationUrl(
+  campaignId: string,
+  registrationUrl: string
+): Promise<string> {
+  const normalizedUrl = buildCampaignRegistrationLink(registrationUrl).slice(0, 1000);
+  await updateDoc(doc(db, CAMPAIGNS_COLLECTION, campaignId), {
+    registrationUrl: normalizedUrl,
+    updatedAt: new Date().toISOString(),
+  });
+  return normalizedUrl;
 }
 
 export async function recomputeAndSyncCampaignCounts(campaignId: string): Promise<PromotionCampaignDoc | null> {
