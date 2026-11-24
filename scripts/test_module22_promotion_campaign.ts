@@ -48,9 +48,11 @@ import {
   validatePublishedRegistrationUrl,
 } from "../netlify/functions/send-course-promotion";
 import {
+  classifyGeminiApiError,
   computeDescriptionHashServer,
   DEFAULT_TRANSLATION_MODEL,
   handleTranslateWithDeps,
+  resolveTranslationModel,
 } from "../netlify/functions/translate-course-description";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1349,7 +1351,7 @@ async function main() {
   });
 
   // 28. Thai-to-English translation server happy path (mocked Gemini model — ZERO live API call)
-  await runTest("28. Server translate endpoint translates Thai course description with mocked gemini-4-hydrogen & strips markdown fences", async () => {
+  await runTest("28. Server translate endpoint translates Thai course description with mocked gemini-3.1-flash-lite & strips markdown fences", async () => {
     const mockDb = createMockAdminDb({});
     let capturedParams: any = null;
     const thaiSource = "อบรมเชิงปฏิบัติการเรื่อง Generative AI และ AI-Assisted Development สำหรับคณาจารย์\n\nเรียนรู้การสร้าง Functional Prototype โดยไม่ต้องเขียนโค้ด (No-Code/Low-Code) ด้วย AI API";
@@ -1384,8 +1386,8 @@ async function main() {
     const body = JSON.parse(res.body);
     assert.equal(body.status, "success");
     assert.equal(body.model, DEFAULT_TRANSLATION_MODEL);
-    assert.equal(DEFAULT_TRANSLATION_MODEL, "gemini-4-hydrogen");
-    assert.equal(capturedParams.model, "gemini-4-hydrogen");
+    assert.equal(DEFAULT_TRANSLATION_MODEL, "gemini-3.1-flash-lite");
+    assert.equal(capturedParams.model, "gemini-3.1-flash-lite");
     assert.equal(body.sourceHash, computeDescriptionHash(thaiSource));
     assert.equal(body.sourceHash, computeDescriptionHashServer(thaiSource));
     assert.ok(!body.translatedText.includes("```"), "Markdown fences should be stripped cleanly");
@@ -1544,7 +1546,7 @@ async function main() {
       translatedText: "Teaching skill development workshop for new faculty members.",
       editedByAdmin: true,
       translatedAt: "2026-06-10T00:00:00.000Z",
-      model: "gemini-4-hydrogen",
+      model: "gemini-3.1-flash-lite",
     };
     const hitDecision = evaluateEnglishAutoTranslation({
       language: "en",
@@ -1646,7 +1648,7 @@ async function main() {
       manualEditEpochAtStart: 0,
       currentManualEditEpoch: 0,
       translatedText: "Fresh academic English translation.",
-      model: "gemini-4-hydrogen",
+      model: "gemini-3.1-flash-lite",
     });
     assert.equal(okMerge.applied, true);
     assert.equal(okMerge.template?.customDescription, "Fresh academic English translation.");
@@ -1982,9 +1984,207 @@ async function main() {
     }
 
     const fnCode = fs.readFileSync(path.join(ROOT_DIR, "netlify/functions/translate-course-description.ts"), "utf8");
-    assert.ok(fnCode.includes("gemini-4-hydrogen"), "Server translation must use gemini-4-hydrogen");
+    assert.ok(fnCode.includes("gemini-3.1-flash-lite"), "Server translation must default to gemini-3.1-flash-lite");
+    assert.ok(fnCode.includes("GEMINI_TRANSLATION_MODEL"), "Server translation must support GEMINI_TRANSLATION_MODEL env var");
     assert.ok(!fnCode.includes("gemini-1.5"), "Server must not use deprecated gemini-1.5 models");
     assert.ok(!fnCode.includes("gemini-2.0"), "Server must not use deprecated gemini-2.0 models");
+  });
+
+  // 37. Error classification distinguishes HTTP 403 permissions vs HTTP 401/API_KEY_INVALID vs 404 model-not-found vs 429 quota
+  await runTest("37. Distinguishes 403 project permission & key restrictions from actual API key invalid, model not found, and quota errors", async () => {
+    const mockDb = createMockAdminDb({});
+    const loggedEntries: Array<{ prefix: string; payload: any }> = [];
+    const baseDeps = {
+      db: mockDb,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      geminiApiKey: "AIzaSySecretKeyNeverAppearInLogs12345",
+      skipRateLimit: true,
+      logErrorFn: (prefix: string, jsonStr: string) => {
+        loggedEntries.push({ prefix, payload: JSON.parse(jsonStr) });
+      },
+    };
+    const validEvent = {
+      httpMethod: "POST",
+      path: TRANSLATE_DESCRIPTION_ENDPOINT,
+      headers: { authorization: "Bearer firebase-secret-jwt-token" },
+      body: JSON.stringify({ sourceText: "รายละเอียดหลักสูตรสำหรับทดสอบข้อผิดพลาด", targetLanguage: "en" }),
+    };
+
+    // Case A: HTTP 403 Generative Language API disabled / project permission -> MUST NOT return AI_KEY_INVALID!
+    const permErrRes = await handleTranslateWithDeps(validEvent, {
+      ...baseDeps,
+      generateContentFn: async () => {
+        const err: any = new Error(
+          JSON.stringify({
+            error: {
+              code: 403,
+              message: "Generative Language API has not been used in project 12345 or it is disabled.",
+              status: "PERMISSION_DENIED",
+              details: [{ reason: "SERVICE_DISABLED" }],
+            },
+          })
+        );
+        err.status = 403;
+        throw err;
+      },
+    });
+    assert.equal(permErrRes.statusCode, 503);
+    const permBody = JSON.parse(permErrRes.body);
+    assert.equal(permBody.code, "AI_PERMISSION_DENIED", "HTTP 403 SERVICE_DISABLED must NOT claim AI_KEY_INVALID");
+    assert.equal(permBody.category, "project_permission_error");
+
+    // Case B: HTTP 403 HTTP referrer restriction -> MUST NOT return AI_KEY_INVALID!
+    const refErrRes = await handleTranslateWithDeps(validEvent, {
+      ...baseDeps,
+      generateContentFn: async () => {
+        const err: any = new Error(
+          JSON.stringify({
+            error: {
+              code: 403,
+              message: "Requests from referer <empty> are blocked.",
+              status: "PERMISSION_DENIED",
+              details: [{ reason: "API_KEY_HTTP_REFERRER_BLOCKED" }],
+            },
+          })
+        );
+        err.status = 403;
+        throw err;
+      },
+    });
+    assert.equal(refErrRes.statusCode, 503);
+    assert.equal(JSON.parse(refErrRes.body).code, "AI_PERMISSION_DENIED");
+    assert.equal(JSON.parse(refErrRes.body).category, "api_restriction_error");
+
+    // Case C: Bare HTTP 403 without API_KEY_INVALID reason -> still AI_PERMISSION_DENIED
+    const bare403 = classifyGeminiApiError({ status: 403, message: "Forbidden" }, "gemini-3.1-flash-lite");
+    assert.equal(bare403.responseCode, "AI_PERMISSION_DENIED");
+    assert.equal(bare403.category, "project_permission_error");
+
+    // Case D: HTTP 400/401 explicit API_KEY_INVALID -> AI_KEY_INVALID
+    const badKeyRes = await handleTranslateWithDeps(validEvent, {
+      ...baseDeps,
+      generateContentFn: async () => {
+        const err: any = new Error(
+          JSON.stringify({
+            error: {
+              code: 400,
+              message: "API key not valid. Please pass a valid API key. ?key=AIzaSySecretKeyNeverAppearInLogs12345",
+              status: "INVALID_ARGUMENT",
+              details: [{ reason: "API_KEY_INVALID" }],
+            },
+          })
+        );
+        err.status = 400;
+        throw err;
+      },
+    });
+    assert.equal(badKeyRes.statusCode, 503);
+    assert.equal(JSON.parse(badKeyRes.body).code, "AI_KEY_INVALID");
+    assert.equal(JSON.parse(badKeyRes.body).category, "api_key_authentication");
+
+    // Case E: HTTP 404 model not found -> AI_MODEL_NOT_FOUND
+    const modelMissingRes = await handleTranslateWithDeps(validEvent, {
+      ...baseDeps,
+      translationModel: "gemini-nonexistent-test",
+      generateContentFn: async () => {
+        const err: any = new Error(
+          JSON.stringify({
+            error: {
+              code: 404,
+              message: "models/gemini-nonexistent-test is not found for API version v1beta",
+              status: "NOT_FOUND",
+            },
+          })
+        );
+        err.status = 404;
+        throw err;
+      },
+    });
+    assert.equal(modelMissingRes.statusCode, 502);
+    const modelMissingBody = JSON.parse(modelMissingRes.body);
+    assert.equal(modelMissingBody.code, "AI_MODEL_NOT_FOUND");
+    assert.equal(modelMissingBody.category, "model_not_found");
+    assert.equal(modelMissingBody.model, "gemini-nonexistent-test");
+
+    // Verify safe diagnostics logs recorded upstreamHttpStatus, errorCategory, modelId and NEVER exposed keys/tokens
+    assert.equal(loggedEntries.length, 4);
+    assert.equal(loggedEntries[0].payload.upstreamHttpStatus, 403);
+    assert.equal(loggedEntries[0].payload.errorCategory, "project_permission_error");
+    assert.equal(loggedEntries[0].payload.modelId, "gemini-3.1-flash-lite");
+    assert.equal(loggedEntries[3].payload.upstreamHttpStatus, 404);
+    assert.equal(loggedEntries[3].payload.modelId, "gemini-nonexistent-test");
+    const serializedLogs = JSON.stringify(loggedEntries);
+    assert.ok(!serializedLogs.includes("AIzaSySecretKeyNeverAppearInLogs12345"), "API key must never appear in logs");
+    assert.ok(!serializedLogs.includes("firebase-secret-jwt-token"), "Firebase token must never appear in logs");
+  });
+
+  // 38. Server-side GEMINI_TRANSLATION_MODEL env var configuration & validation
+  await runTest("38. Reads server-side GEMINI_TRANSLATION_MODEL env var, strips models/ prefix, and rejects invalid model strings", async () => {
+    const prevModelEnv = process.env.GEMINI_TRANSLATION_MODEL;
+    try {
+      delete process.env.GEMINI_TRANSLATION_MODEL;
+      assert.deepEqual(resolveTranslationModel(), {
+        valid: true,
+        model: "gemini-3.1-flash-lite",
+        source: "default",
+      });
+
+      process.env.GEMINI_TRANSLATION_MODEL = "models/gemini-2.5-flash-lite";
+      assert.deepEqual(resolveTranslationModel(), {
+        valid: true,
+        model: "gemini-2.5-flash-lite",
+        source: "env",
+      });
+
+      let usedModel = "";
+      const mockDb = createMockAdminDb({});
+      const okRes = await handleTranslateWithDeps(
+        {
+          httpMethod: "POST",
+          path: TRANSLATE_DESCRIPTION_ENDPOINT,
+          headers: { authorization: "Bearer valid-admin-jwt" },
+          body: JSON.stringify({ sourceText: "รายละเอียดหลักสูตร", targetLanguage: "en" }),
+        },
+        {
+          db: mockDb,
+          verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+          verifyAdmin: async () => true,
+          geminiApiKey: "mock-key",
+          skipRateLimit: true,
+          generateContentFn: async (p) => {
+            usedModel = p.model;
+            return { text: "Course overview in English." };
+          },
+        }
+      );
+      assert.equal(okRes.statusCode, 200);
+      assert.equal(usedModel, "gemini-2.5-flash-lite");
+      assert.equal(JSON.parse(okRes.body).model, "gemini-2.5-flash-lite");
+
+      process.env.GEMINI_TRANSLATION_MODEL = "bad model/with spaces";
+      const badModelRes = await handleTranslateWithDeps(
+        {
+          httpMethod: "POST",
+          path: TRANSLATE_DESCRIPTION_ENDPOINT,
+          headers: { authorization: "Bearer valid-admin-jwt" },
+          body: JSON.stringify({ sourceText: "รายละเอียดหลักสูตร", targetLanguage: "en" }),
+        },
+        {
+          db: mockDb,
+          verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+          verifyAdmin: async () => true,
+          geminiApiKey: "mock-key",
+          skipRateLimit: true,
+          logErrorFn: () => {},
+        }
+      );
+      assert.equal(badModelRes.statusCode, 503);
+      assert.equal(JSON.parse(badModelRes.body).code, "AI_MODEL_CONFIG_INVALID");
+    } finally {
+      if (prevModelEnv !== undefined) process.env.GEMINI_TRANSLATION_MODEL = prevModelEnv;
+      else delete process.env.GEMINI_TRANSLATION_MODEL;
+    }
   });
 
   console.log(`\n=== All ${passed} Module 22 Offline Tests Passed ===`);

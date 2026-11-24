@@ -18,7 +18,7 @@ interface HandlerResponse {
   body: string;
 }
 
-export const DEFAULT_TRANSLATION_MODEL = "gemini-4-hydrogen";
+export const DEFAULT_TRANSLATION_MODEL = "gemini-3.1-flash-lite";
 export const MAX_TRANSLATE_REQUEST_BYTES = 128 * 1024; // 128 KB
 export const MAX_SOURCE_TEXT_CHARS = 6000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -43,6 +43,34 @@ const CORS_HEADERS = {
 
 const adminRateBuckets = new Map<string, number[]>();
 
+export type GeminiErrorCategory =
+  | "timeout"
+  | "quota_exhausted"
+  | "model_not_found"
+  | "api_key_authentication"
+  | "project_permission_error"
+  | "api_restriction_error"
+  | "invalid_request"
+  | "upstream_unavailable";
+
+export interface ClassifiedGeminiError {
+  httpStatus: number;
+  responseCode:
+    | "AI_TIMEOUT"
+    | "AI_QUOTA_EXHAUSTED"
+    | "AI_MODEL_NOT_FOUND"
+    | "AI_KEY_INVALID"
+    | "AI_PERMISSION_DENIED"
+    | "AI_BAD_REQUEST"
+    | "AI_TRANSLATION_FAILED";
+  category: GeminiErrorCategory;
+  upstreamHttpStatus: number | null;
+  upstreamGrpcStatus: string | null;
+  upstreamReason: string | null;
+  sanitizedDetail: string;
+  userMessage: string;
+}
+
 export interface TranslateHandlerDeps {
   db?: any;
   projectId?: string;
@@ -50,6 +78,7 @@ export interface TranslateHandlerDeps {
   verifyIdToken?: (token: string) => Promise<{ uid: string; email?: string; email_verified?: boolean }>;
   verifyAdmin?: (db: any, uid: string, email?: string, emailVerified?: boolean) => Promise<boolean>;
   geminiApiKey?: string;
+  translationModel?: string;
   generateContentFn?: (params: {
     model: string;
     contents: string;
@@ -57,6 +86,7 @@ export interface TranslateHandlerDeps {
   }) => Promise<{ text?: string }>;
   timeoutMs?: number;
   skipRateLimit?: boolean;
+  logErrorFn?: (prefix: string, diagnosticPayloadJson: string) => void;
 }
 
 function getFirebaseAdmin(): { app: App; db: Firestore; projectId: string; databaseId: string } | null {
@@ -133,6 +163,253 @@ function checkInMemoryRateLimit(uid: string): boolean {
   timestamps.push(now);
   adminRateBuckets.set(uid, timestamps);
   return true;
+}
+
+export function resolveTranslationModel(explicitModel?: string): {
+  valid: boolean;
+  model: string;
+  source: "override" | "env" | "default";
+} {
+  const fromOverride = typeof explicitModel === "string" ? explicitModel.trim() : "";
+  const fromEnv = typeof process.env.GEMINI_TRANSLATION_MODEL === "string"
+    ? process.env.GEMINI_TRANSLATION_MODEL.trim()
+    : "";
+
+  const source: "override" | "env" | "default" = fromOverride
+    ? "override"
+    : fromEnv
+    ? "env"
+    : "default";
+
+  const candidateRaw = fromOverride || fromEnv || DEFAULT_TRANSLATION_MODEL;
+  const normalized = candidateRaw.replace(/^models\//i, "").trim();
+
+  if (!normalized || normalized.length > 100 || !/^[a-zA-Z0-9._-]+$/.test(normalized)) {
+    return { valid: false, model: normalized || DEFAULT_TRANSLATION_MODEL, source };
+  }
+
+  return { valid: true, model: normalized, source };
+}
+
+export function sanitizeDiagnosticText(raw: string, secretsToRedact: string[] = []): string {
+  let cleaned = String(raw || "");
+  for (const secret of secretsToRedact) {
+    if (secret && secret.length >= 6) {
+      cleaned = cleaned.split(secret).join("[REDACTED]");
+    }
+  }
+  cleaned = cleaned.replace(/([?&](?:key|api_key|token|access_token)=)[^&\s"']+/gi, "$1[REDACTED]");
+  cleaned = cleaned.replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]");
+  cleaned = cleaned.replace(/\bAIza[0-9A-Za-z_-]{15,}\b/g, "[REDACTED_GOOGLE_KEY]");
+  cleaned = cleaned.replace(/\s+/g, " ").trim();
+  return cleaned.slice(0, 260);
+}
+
+function extractGoogleErrorMetadata(err: any): {
+  upstreamHttpStatus: number | null;
+  grpcStatus: string | null;
+  reason: string | null;
+  messageText: string;
+} {
+  const rawMessage = typeof err?.message === "string" ? err.message : String(err || "");
+  let parsedJson: any = null;
+
+  const jsonStart = rawMessage.indexOf("{");
+  if (jsonStart !== -1) {
+    try {
+      parsedJson = JSON.parse(rawMessage.slice(jsonStart));
+    } catch {
+      parsedJson = null;
+    }
+  } else if (err?.error && typeof err.error === "object") {
+    parsedJson = { error: err.error };
+  }
+
+  const errObj = parsedJson?.error || parsedJson || {};
+  const statusCandidate = Number(
+    err?.status ?? err?.statusCode ?? errObj?.code ?? err?.response?.status ?? 0
+  );
+  const upstreamHttpStatus =
+    Number.isFinite(statusCandidate) && statusCandidate >= 100 && statusCandidate <= 599
+      ? statusCandidate
+      : null;
+
+  const grpcStatus =
+    typeof errObj?.status === "string"
+      ? errObj.status.trim()
+      : typeof err?.statusText === "string"
+      ? err.statusText.trim()
+      : null;
+
+  let reason: string | null = typeof err?.reason === "string" ? err.reason.trim() : null;
+  const details = Array.isArray(errObj?.details) ? errObj.details : [];
+  for (const d of details) {
+    if (!reason && typeof d?.reason === "string" && d.reason.trim()) {
+      reason = d.reason.trim();
+    }
+  }
+
+  const messageText =
+    typeof errObj?.message === "string" && errObj.message.trim()
+      ? errObj.message.trim()
+      : rawMessage;
+
+  return { upstreamHttpStatus, grpcStatus, reason, messageText };
+}
+
+export function classifyGeminiApiError(
+  err: unknown,
+  modelId: string,
+  secretsToRedact: string[] = []
+): ClassifiedGeminiError {
+  const meta = extractGoogleErrorMetadata(err);
+  const rawErrCode = String((err as any)?.code || "").trim();
+  const combinedSignals = [
+    rawErrCode,
+    meta.grpcStatus || "",
+    meta.reason || "",
+    meta.messageText || "",
+    String((err as any)?.message || ""),
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  const sanitizedDetail = sanitizeDiagnosticText(meta.messageText || combinedSignals, secretsToRedact);
+
+  // 1. Timeout / Abort
+  if (rawErrCode === "AI_TIMEOUT" || /timeout|ETIMEDOUT|ABORT/i.test(combinedSignals)) {
+    return {
+      httpStatus: 504,
+      responseCode: "AI_TIMEOUT",
+      category: "timeout",
+      upstreamHttpStatus: meta.upstreamHttpStatus,
+      upstreamGrpcStatus: meta.grpcStatus,
+      upstreamReason: meta.reason,
+      sanitizedDetail,
+      userMessage:
+        "AI translation service timed out. Please retry or edit the English Course Overview manually.",
+    };
+  }
+
+  // 2. Quota / Rate limit (429 / RESOURCE_EXHAUSTED)
+  if (
+    meta.upstreamHttpStatus === 429 ||
+    meta.grpcStatus === "RESOURCE_EXHAUSTED" ||
+    /RESOURCE_EXHAUSTED|RATE_LIMIT_EXCEEDED|QUOTA_EXCEEDED|\bquota\b|rate limit/i.test(combinedSignals)
+  ) {
+    return {
+      httpStatus: 429,
+      responseCode: "AI_QUOTA_EXHAUSTED",
+      category: "quota_exhausted",
+      upstreamHttpStatus: meta.upstreamHttpStatus,
+      upstreamGrpcStatus: meta.grpcStatus,
+      upstreamReason: meta.reason,
+      sanitizedDetail,
+      userMessage:
+        "AI translation rate or quota limit reached temporarily. Please wait a moment or type the English description manually.",
+    };
+  }
+
+  // 3. Model not found / unsupported for generateContent (404 / NOT_FOUND / model error messages)
+  if (
+    meta.upstreamHttpStatus === 404 ||
+    meta.grpcStatus === "NOT_FOUND" ||
+    /models\/[^\s]+.*(?:not found|not supported|deprecated)|is not found for api version|not supported for generateContent|model.*does not exist|unknown model/i.test(
+      combinedSignals
+    )
+  ) {
+    return {
+      httpStatus: 502,
+      responseCode: "AI_MODEL_NOT_FOUND",
+      category: "model_not_found",
+      upstreamHttpStatus: meta.upstreamHttpStatus,
+      upstreamGrpcStatus: meta.grpcStatus,
+      upstreamReason: meta.reason,
+      sanitizedDetail,
+      userMessage:
+        `Configured translation model (${modelId}) is unavailable or unsupported on the AI API. You can edit the English Course Overview manually while an admin updates GEMINI_TRANSLATION_MODEL.`,
+    };
+  }
+
+  // 4. Actual API Key Authentication failure (ONLY explicit auth/key errors, NEVER bare HTTP 403)
+  if (
+    meta.upstreamHttpStatus === 401 ||
+    meta.grpcStatus === "UNAUTHENTICATED" ||
+    meta.reason === "API_KEY_INVALID" ||
+    meta.reason === "API_KEY_EXPIRED" ||
+    /API_KEY_INVALID|API_KEY_EXPIRED|API key not valid|invalid api key|expired api key|API key expired|UNAUTHENTICATED/i.test(
+      combinedSignals
+    )
+  ) {
+    return {
+      httpStatus: 503,
+      responseCode: "AI_KEY_INVALID",
+      category: "api_key_authentication",
+      upstreamHttpStatus: meta.upstreamHttpStatus,
+      upstreamGrpcStatus: meta.grpcStatus,
+      upstreamReason: meta.reason,
+      sanitizedDetail,
+      userMessage:
+        "AI translation API authentication failed on the server. Manual English entry remains available.",
+    };
+  }
+
+  // 5. Project permission, API not enabled, or HTTP referrer / IP key restriction (HTTP 403 / PERMISSION_DENIED)
+  if (
+    meta.upstreamHttpStatus === 403 ||
+    meta.grpcStatus === "PERMISSION_DENIED" ||
+    /PERMISSION_DENIED|SERVICE_DISABLED|API_KEY_HTTP_REFERRER_BLOCKED|API_KEY_IP_ADDRESS_BLOCKED|API_KEY_SERVICE_BLOCKED|has not been used in project|it is disabled|does not have permission|location is not supported/i.test(
+      combinedSignals
+    )
+  ) {
+    const isRestriction =
+      meta.reason === "API_KEY_HTTP_REFERRER_BLOCKED" ||
+      meta.reason === "API_KEY_IP_ADDRESS_BLOCKED" ||
+      meta.reason === "API_KEY_SERVICE_BLOCKED" ||
+      /REFERRER_BLOCKED|IP_ADDRESS_BLOCKED|referer|HTTP referrer|API_KEY_SERVICE_BLOCKED/i.test(
+        combinedSignals
+      );
+
+    return {
+      httpStatus: 503,
+      responseCode: "AI_PERMISSION_DENIED",
+      category: isRestriction ? "api_restriction_error" : "project_permission_error",
+      upstreamHttpStatus: meta.upstreamHttpStatus,
+      upstreamGrpcStatus: meta.grpcStatus,
+      upstreamReason: meta.reason,
+      sanitizedDetail,
+      userMessage: isRestriction
+        ? "AI translation request was blocked by Google API key restrictions (HTTP referrer, IP, or API restriction) on the server. Manual English entry remains available."
+        : "Google Cloud project permission or Generative Language API access blocked this translation request. Manual English entry remains available.",
+    };
+  }
+
+  // 6. Other client argument errors (HTTP 400 / INVALID_ARGUMENT)
+  if (meta.upstreamHttpStatus === 400 || meta.grpcStatus === "INVALID_ARGUMENT") {
+    return {
+      httpStatus: 400,
+      responseCode: "AI_BAD_REQUEST",
+      category: "invalid_request",
+      upstreamHttpStatus: meta.upstreamHttpStatus,
+      upstreamGrpcStatus: meta.grpcStatus,
+      upstreamReason: meta.reason,
+      sanitizedDetail,
+      userMessage:
+        "Translation request parameters were rejected by the AI service. Manual English entry remains available.",
+    };
+  }
+
+  // 7. Generic upstream availability/network failure
+  return {
+    httpStatus: 502,
+    responseCode: "AI_TRANSLATION_FAILED",
+    category: "upstream_unavailable",
+    upstreamHttpStatus: meta.upstreamHttpStatus,
+    upstreamGrpcStatus: meta.grpcStatus,
+    upstreamReason: meta.reason,
+    sanitizedDetail,
+    userMessage:
+      "Unable to translate course description automatically right now. Please try again or edit manually.",
+  };
 }
 
 export function containsThaiCharactersServer(raw: unknown): boolean {
@@ -388,6 +665,36 @@ export async function handleTranslateWithDeps(
     };
   }
 
+  const logError =
+    deps?.logErrorFn ||
+    ((prefix: string, detailsJson: string) => {
+      console.error(prefix, detailsJson);
+    });
+
+  const modelResolution = resolveTranslationModel(deps?.translationModel);
+  if (!modelResolution.valid) {
+    logError(
+      "[translate-course-description] Invalid GEMINI_TRANSLATION_MODEL configuration",
+      JSON.stringify({
+        upstreamHttpStatus: null,
+        errorCategory: "invalid_model_config",
+        modelId: sanitizeDiagnosticText(modelResolution.model, [apiKey, idToken]),
+        modelSource: modelResolution.source,
+      })
+    );
+    return {
+      statusCode: 503,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        status: "error",
+        code: "AI_MODEL_CONFIG_INVALID",
+        message:
+          "Server GEMINI_TRANSLATION_MODEL configuration is invalid. You can type or paste the English Course Overview manually.",
+      }),
+    };
+  }
+  const activeModel = modelResolution.model;
+
   const userPrompt = [
     courseTitle ? `Course title (context only, do not prepend as heading unless part of description): ${courseTitle}` : "",
     "Thai course description to translate into academic English:",
@@ -403,7 +710,7 @@ export async function handleTranslateWithDeps(
     const runGeneration = async (): Promise<{ text?: string }> => {
       if (deps?.generateContentFn) {
         return await deps.generateContentFn({
-          model: DEFAULT_TRANSLATION_MODEL,
+          model: activeModel,
           contents: userPrompt,
           systemInstruction: TRANSLATION_SYSTEM_INSTRUCTION,
         });
@@ -419,7 +726,7 @@ export async function handleTranslateWithDeps(
       });
 
       return await ai.models.generateContent({
-        model: DEFAULT_TRANSLATION_MODEL,
+        model: activeModel,
         contents: userPrompt,
         config: {
           systemInstruction: TRANSLATION_SYSTEM_INSTRUCTION,
@@ -439,24 +746,44 @@ export async function handleTranslateWithDeps(
     const cleaned = sanitizeTranslatedPlainText(result?.text || "");
 
     if (!cleaned) {
+      logError(
+        "[translate-course-description] Gemini returned empty text",
+        JSON.stringify({
+          upstreamHttpStatus: 200,
+          errorCategory: "empty_output",
+          modelId: activeModel,
+        })
+      );
       return {
         statusCode: 502,
         headers: CORS_HEADERS,
         body: JSON.stringify({
           status: "error",
           code: "AI_EMPTY_OUTPUT",
+          category: "empty_output",
+          model: activeModel,
           message: "AI translation returned an empty response. Please try again or edit the English description manually.",
         }),
       };
     }
 
     if (containsThaiCharactersServer(cleaned)) {
+      logError(
+        "[translate-course-description] Incomplete translation output contained Thai characters",
+        JSON.stringify({
+          upstreamHttpStatus: 200,
+          errorCategory: "incomplete_translation",
+          modelId: activeModel,
+        })
+      );
       return {
         statusCode: 502,
         headers: CORS_HEADERS,
         body: JSON.stringify({
           status: "error",
           code: "AI_INCOMPLETE_TRANSLATION",
+          category: "incomplete_translation",
+          model: activeModel,
           message: "AI translation output still contained Thai characters. Please try again or edit manually.",
         }),
       };
@@ -470,57 +797,34 @@ export async function handleTranslateWithDeps(
         translatedText: cleaned,
         targetLanguage: "en",
         sourceHash,
-        model: DEFAULT_TRANSLATION_MODEL,
+        model: activeModel,
       }),
     };
   } catch (err: any) {
-    const rawMsg = String(err?.message || "");
-    const statusNum = Number(err?.status || err?.statusCode || 0);
+    const classified = classifyGeminiApiError(err, activeModel, [apiKey, idToken]);
 
-    if (err?.code === "AI_TIMEOUT" || /timeout|ETIMEDOUT|ABORT/i.test(rawMsg)) {
-      return {
-        statusCode: 504,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          status: "error",
-          code: "AI_TIMEOUT",
-          message: "AI translation service timed out. Please retry or edit the English Course Overview manually.",
-        }),
-      };
-    }
+    logError(
+      "[translate-course-description] Gemini request failed",
+      JSON.stringify({
+        upstreamHttpStatus: classified.upstreamHttpStatus,
+        upstreamGrpcStatus: classified.upstreamGrpcStatus,
+        upstreamReason: classified.upstreamReason,
+        errorCategory: classified.category,
+        responseCode: classified.responseCode,
+        modelId: activeModel,
+        sanitizedDetail: classified.sanitizedDetail,
+      })
+    );
 
-    if (statusNum === 429 || /RESOURCE_EXHAUSTED|quota|rate limit/i.test(rawMsg)) {
-      return {
-        statusCode: 429,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          status: "error",
-          code: "AI_QUOTA_EXHAUSTED",
-          message: "AI translation rate/quota limit reached temporarily. Please wait a moment or type the English description manually.",
-        }),
-      };
-    }
-
-    if (statusNum === 401 || statusNum === 403 || /API key|PERMISSION_DENIED|UNAUTHENTICATED/i.test(rawMsg)) {
-      return {
-        statusCode: 503,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          status: "error",
-          code: "AI_KEY_INVALID",
-          message: "AI translation credentials are invalid or restricted on the server. Manual English entry remains available.",
-        }),
-      };
-    }
-
-    console.error("[translate-course-description] AI error:", rawMsg.slice(0, 200));
     return {
-      statusCode: 502,
+      statusCode: classified.httpStatus,
       headers: CORS_HEADERS,
       body: JSON.stringify({
         status: "error",
-        code: "AI_TRANSLATION_FAILED",
-        message: "Unable to translate course description automatically right now. Please try again or edit manually.",
+        code: classified.responseCode,
+        category: classified.category,
+        model: activeModel,
+        message: classified.userMessage,
       }),
     };
   } finally {
