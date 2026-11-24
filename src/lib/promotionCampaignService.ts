@@ -25,6 +25,7 @@ import {
   PromotionTemplateData,
   RecipientDeliveryStatus,
   SuppressionEntry,
+  TranslationCacheEntry,
   ValidatedRecipient,
 } from "./promotionCampaign";
 
@@ -50,6 +51,8 @@ export function buildFirestoreCampaignRecord(params: {
   courseTitle: string;
   language: CampaignLanguage;
   template: PromotionTemplateData;
+  languageDrafts?: Partial<Record<CampaignLanguage, PromotionTemplateData>>;
+  translationCache?: Partial<Record<CampaignLanguage, TranslationCacheEntry>>;
   registrationUrl: string;
   poster: PosterConfig;
   recipientsCount: number;
@@ -78,6 +81,12 @@ export function buildFirestoreCampaignRecord(params: {
     language: params.language,
     subject: params.template.subject.trim().slice(0, 300),
     template: params.template,
+    ...(params.languageDrafts && Object.keys(params.languageDrafts).length > 0
+      ? { languageDrafts: params.languageDrafts }
+      : {}),
+    ...(params.translationCache && Object.keys(params.translationCache).length > 0
+      ? { translationCache: params.translationCache }
+      : {}),
     registrationUrl: buildCampaignRegistrationLink(params.registrationUrl).slice(0, 1000),
     posterMode: params.poster.mode,
     ...(params.poster.publicUrl ? { posterUrl: params.poster.publicUrl } : {}),

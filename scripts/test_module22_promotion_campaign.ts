@@ -4,17 +4,23 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  applyAsyncTranslationResultIfEligible,
   buildCampaignRecipientDocId,
   buildCampaignRegistrationLink,
   buildSuppressionDocId,
+  buildTranslationCacheKey,
+  computeDescriptionHash,
+  containsThaiCharacters,
   deletePromotionCampaign,
   deriveInitialPosterFromCourse,
   dispatchPromotionBatch,
   evaluateCampaignDeletionEligibility,
+  evaluateEnglishAutoTranslation,
   fetchPromotionQuota,
   generateCampaignResultsCsv,
   getDefaultPromotionTemplate,
   isAuthorizedUniversityEmail,
+  isCachedTranslationStale,
   MAX_POSTER_BYTES,
   normalizeEmailAddress,
   parseEmailAddressesText,
@@ -23,9 +29,12 @@ import {
   PROMOTION_GATEWAY_FALLBACK_ENDPOINT,
   reconcileAndValidateRecipients,
   renderPromotionEmail,
+  resolveEnglishDescriptionGuard,
   resolveGreetingForRecipient,
   resolveInitialCampaignLanguage,
   sendPromotionTestEmail,
+  translateCourseDescription,
+  TRANSLATE_DESCRIPTION_ENDPOINT,
   validateExternalPosterUrl,
 } from "../src/lib/promotionCampaign";
 import { buildCourseRegistrationUrl } from "../src/lib/appUrl";
@@ -38,6 +47,11 @@ import {
   validatePosterPayload,
   validatePublishedRegistrationUrl,
 } from "../netlify/functions/send-course-promotion";
+import {
+  computeDescriptionHashServer,
+  DEFAULT_TRANSLATION_MODEL,
+  handleTranslateWithDeps,
+} from "../netlify/functions/translate-course-description";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1332,6 +1346,645 @@ async function main() {
     const rules = fs.readFileSync(path.join(ROOT_DIR, "firestore.rules"), "utf8");
     assert.ok(rules.includes("resource.data.status in ['draft', 'ready', 'paused']"));
     assert.ok(rules.includes("!(resource.data.status in ['sent', 'unknown', 'processing'])"));
+  });
+
+  // 28. Thai-to-English translation server happy path (mocked Gemini model — ZERO live API call)
+  await runTest("28. Server translate endpoint translates Thai course description with mocked gemini-4-hydrogen & strips markdown fences", async () => {
+    const mockDb = createMockAdminDb({});
+    let capturedParams: any = null;
+    const thaiSource = "อบรมเชิงปฏิบัติการเรื่อง Generative AI และ AI-Assisted Development สำหรับคณาจารย์\n\nเรียนรู้การสร้าง Functional Prototype โดยไม่ต้องเขียนโค้ด (No-Code/Low-Code) ด้วย AI API";
+    const res = await handleTranslateWithDeps(
+      {
+        httpMethod: "POST",
+        path: TRANSLATE_DESCRIPTION_ENDPOINT,
+        headers: { authorization: "Bearer valid-admin-jwt" },
+        body: JSON.stringify({
+          courseId: "c-ai-2026",
+          courseTitle: "Generative AI Workshop",
+          sourceText: thaiSource,
+          targetLanguage: "en",
+        }),
+      },
+      {
+        db: mockDb,
+        verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+        verifyAdmin: async () => true,
+        geminiApiKey: "mock-server-key-never-logged",
+        skipRateLimit: true,
+        generateContentFn: async (params) => {
+          capturedParams = params;
+          return {
+            text: "```text\nThis hands-on workshop introduces faculty members to Generative AI and AI-Assisted Development.\n\nParticipants will learn to build a Functional Prototype using No-Code/Low-Code workflows and AI API integrations.\n```",
+          };
+        },
+      }
+    );
+
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.status, "success");
+    assert.equal(body.model, DEFAULT_TRANSLATION_MODEL);
+    assert.equal(DEFAULT_TRANSLATION_MODEL, "gemini-4-hydrogen");
+    assert.equal(capturedParams.model, "gemini-4-hydrogen");
+    assert.equal(body.sourceHash, computeDescriptionHash(thaiSource));
+    assert.equal(body.sourceHash, computeDescriptionHashServer(thaiSource));
+    assert.ok(!body.translatedText.includes("```"), "Markdown fences should be stripped cleanly");
+    assert.ok(body.translatedText.includes("Generative AI"));
+    assert.ok(body.translatedText.includes("No-Code/Low-Code"));
+    assert.ok(body.translatedText.includes("\n\n"), "Paragraph structure should be preserved");
+    assert.equal(containsThaiCharacters(body.translatedText), false);
+    assert.ok(!res.body.includes("mock-server-key-never-logged"));
+  });
+
+  // 29. Translation endpoint security: unauthenticated (401), non-admin (403), invalid method (405), payload/markup guards
+  await runTest("29. Translation endpoint blocks unauthenticated, non-admin, empty, oversized, and unsafe requests", async () => {
+    const mockDb = createMockAdminDb({});
+
+    const getRes = await handleTranslateWithDeps(
+      { httpMethod: "GET", path: TRANSLATE_DESCRIPTION_ENDPOINT, headers: {}, body: null },
+      { db: mockDb, skipRateLimit: true }
+    );
+    assert.equal(getRes.statusCode, 405);
+
+    const noAuth = await handleTranslateWithDeps(
+      {
+        httpMethod: "POST",
+        path: TRANSLATE_DESCRIPTION_ENDPOINT,
+        headers: {},
+        body: JSON.stringify({ sourceText: "รายละเอียดหลักสูตร", targetLanguage: "en" }),
+      },
+      { db: mockDb, skipRateLimit: true }
+    );
+    assert.equal(noAuth.statusCode, 401);
+
+    const nonAdmin = await handleTranslateWithDeps(
+      {
+        httpMethod: "POST",
+        path: TRANSLATE_DESCRIPTION_ENDPOINT,
+        headers: { authorization: "Bearer regular-token" },
+        body: JSON.stringify({ sourceText: "รายละเอียดหลักสูตร", targetLanguage: "en" }),
+      },
+      {
+        db: mockDb,
+        verifyIdToken: async () => ({ uid: "user-1", email: "teacher@bu.ac.th", email_verified: true }),
+        verifyAdmin: async () => false,
+        skipRateLimit: true,
+      }
+    );
+    assert.equal(nonAdmin.statusCode, 403);
+    assert.equal(JSON.parse(nonAdmin.body).code, "FORBIDDEN");
+
+    const adminDeps = {
+      db: mockDb,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      geminiApiKey: "mock-key",
+      skipRateLimit: true,
+    };
+
+    const emptyRes = await handleTranslateWithDeps(
+      {
+        httpMethod: "POST",
+        path: TRANSLATE_DESCRIPTION_ENDPOINT,
+        headers: { authorization: "Bearer admin-jwt" },
+        body: JSON.stringify({ sourceText: "   \n  ", targetLanguage: "en" }),
+      },
+      adminDeps
+    );
+    assert.equal(emptyRes.statusCode, 400);
+    assert.equal(JSON.parse(emptyRes.body).code, "EMPTY_SOURCE_TEXT");
+
+    const oversizedRes = await handleTranslateWithDeps(
+      {
+        httpMethod: "POST",
+        path: TRANSLATE_DESCRIPTION_ENDPOINT,
+        headers: { authorization: "Bearer admin-jwt" },
+        body: JSON.stringify({ sourceText: "ก".repeat(6500), targetLanguage: "en" }),
+      },
+      adminDeps
+    );
+    assert.equal(oversizedRes.statusCode, 400);
+    assert.equal(JSON.parse(oversizedRes.body).code, "SOURCE_TEXT_TOO_LONG");
+
+    const xssRes = await handleTranslateWithDeps(
+      {
+        httpMethod: "POST",
+        path: TRANSLATE_DESCRIPTION_ENDPOINT,
+        headers: { authorization: "Bearer admin-jwt" },
+        body: JSON.stringify({ sourceText: "รายละเอียด <script>alert(1)</script>", targetLanguage: "en" }),
+      },
+      adminDeps
+    );
+    assert.equal(xssRes.statusCode, 400);
+    assert.equal(JSON.parse(xssRes.body).code, "UNSAFE_CONTENT");
+  });
+
+  // 30. Already-English description skips AI calls cleanly on both client and server
+  await runTest("30. Non-Thai/already-English course description skips unnecessary AI calls", async () => {
+    const mockDb = createMockAdminDb({});
+    let aiCalled = false;
+    const enSource = "Hands-on workshop covering active learning and curriculum design.";
+
+    const serverRes = await handleTranslateWithDeps(
+      {
+        httpMethod: "POST",
+        path: TRANSLATE_DESCRIPTION_ENDPOINT,
+        headers: { authorization: "Bearer admin-jwt" },
+        body: JSON.stringify({ sourceText: enSource, targetLanguage: "en" }),
+      },
+      {
+        db: mockDb,
+        verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+        verifyAdmin: async () => true,
+        skipRateLimit: true,
+        generateContentFn: async () => {
+          aiCalled = true;
+          return { text: "Should not run" };
+        },
+      }
+    );
+    assert.equal(serverRes.statusCode, 200);
+    assert.equal(aiCalled, false);
+    assert.equal(JSON.parse(serverRes.body).model, "passthrough-non-thai");
+
+    const clientDecision = evaluateEnglishAutoTranslation({
+      language: "en",
+      courseId: "c-en",
+      courseDescription: enSource,
+    });
+    assert.equal(clientDecision.action, "noop");
+    assert.equal(clientDecision.reason, "source_already_non_thai");
+  });
+
+  // 31. Cache hit, stale source detection, and no silent overwrite of manual English edits across TH <-> EN switches
+  await runTest("31. Caching avoids repeat AI calls, flags source changes stale, and preserves manual EN & TH edits independently", () => {
+    const thaiDescV1 = "อบรมพัฒนาทักษะการสอนสำหรับอาจารย์ใหม่";
+    const thaiDescV2 = "อบรมพัฒนาทักษะการสอนและวิจัยสำหรับอาจารย์ใหม่ (ปรับปรุงเนื้อหา)";
+    const hashV1 = computeDescriptionHash(thaiDescV1);
+
+    // 1. Default EN template must NEVER silently copy raw Thai description
+    const initialEn = getDefaultPromotionTemplate({ id: "c1", title: "Faculty Training", description: thaiDescV1 }, "en");
+    assert.equal(initialEn.customDescription, "", "getDefaultPromotionTemplate('en') must not copy raw Thai course.description");
+    const initialTh = getDefaultPromotionTemplate({ id: "c1", title: "อบรมอาจารย์ใหม่", description: thaiDescV1 }, "th");
+    assert.equal(initialTh.customDescription, thaiDescV1);
+
+    // 2. Cache miss -> needs translation
+    const missDecision = evaluateEnglishAutoTranslation({
+      language: "en",
+      courseId: "c1",
+      courseDescription: thaiDescV1,
+    });
+    assert.equal(missDecision.action, "translate");
+
+    // 3. Cache hit -> reuse cached translation cleanly without calling AI again
+    const cachedEntry = {
+      courseId: "c1",
+      sourceHash: hashV1,
+      targetLanguage: "en" as const,
+      translatedText: "Teaching skill development workshop for new faculty members.",
+      editedByAdmin: true,
+      translatedAt: "2026-06-10T00:00:00.000Z",
+      model: "gemini-4-hydrogen",
+    };
+    const hitDecision = evaluateEnglishAutoTranslation({
+      language: "en",
+      courseId: "c1",
+      courseDescription: thaiDescV1,
+      cacheEntry: cachedEntry,
+    });
+    assert.equal(hitDecision.action, "reuse_cache");
+    assert.equal(hitDecision.reuseText, cachedEntry.translatedText);
+    assert.equal(isCachedTranslationStale(cachedEntry, thaiDescV1), false);
+
+    // 4. Source Thai description changed later -> detects hash mismatch, marks stale, preserves manually edited EN text
+    assert.equal(isCachedTranslationStale(cachedEntry, thaiDescV2), true);
+    const staleDecision = evaluateEnglishAutoTranslation({
+      language: "en",
+      courseId: "c1",
+      courseDescription: thaiDescV2,
+      currentDraft: {
+        ...initialEn,
+        customDescription: "Custom Admin EN overview.",
+        translationMeta: { sourceHash: hashV1, editedByAdmin: true },
+      },
+      cacheEntry: cachedEntry,
+    });
+    assert.equal(staleDecision.action, "stale_warning");
+    assert.equal(staleDecision.isStale, true);
+    assert.notEqual(buildTranslationCacheKey("c1", hashV1, "en"), buildTranslationCacheKey("c1", computeDescriptionHash(thaiDescV2), "en"));
+  });
+
+  // 32. Async race-condition protection: slow response ignored on course switch, language switch back to TH, or manual edit
+  await runTest("32. Stale async translation responses are ignored if user changed language, course, source, or typed manually", () => {
+    const baseEn = getDefaultPromotionTemplate({ id: "c1", title: "Course 1", description: "รายละเอียด A" }, "en");
+    const hashA = computeDescriptionHash("รายละเอียด A");
+
+    // Superseded request sequence
+    assert.equal(
+      applyAsyncTranslationResultIfEligible({
+        requestSeq: 1,
+        latestRequestSeq: 2,
+        requestCourseId: "c1",
+        activeCourseId: "c1",
+        activeLanguage: "en",
+        requestSourceHash: hashA,
+        currentCourseDescription: "รายละเอียด A",
+        currentTemplate: baseEn,
+        manualEditEpochAtStart: 0,
+        currentManualEditEpoch: 0,
+        translatedText: "Old AI translation",
+      }).applied,
+      false
+    );
+
+    // Switched back to Thai while EN request was in flight
+    assert.equal(
+      applyAsyncTranslationResultIfEligible({
+        requestSeq: 2,
+        latestRequestSeq: 2,
+        requestCourseId: "c1",
+        activeCourseId: "c1",
+        activeLanguage: "th",
+        requestSourceHash: hashA,
+        currentCourseDescription: "รายละเอียด A",
+        currentTemplate: baseEn,
+        manualEditEpochAtStart: 0,
+        currentManualEditEpoch: 0,
+        translatedText: "Should not overwrite TH",
+      }).applied,
+      false
+    );
+
+    // Admin started typing manually while AI request was in flight
+    assert.equal(
+      applyAsyncTranslationResultIfEligible({
+        requestSeq: 2,
+        latestRequestSeq: 2,
+        requestCourseId: "c1",
+        activeCourseId: "c1",
+        activeLanguage: "en",
+        requestSourceHash: hashA,
+        currentCourseDescription: "รายละเอียด A",
+        currentTemplate: baseEn,
+        manualEditEpochAtStart: 0,
+        currentManualEditEpoch: 1,
+        translatedText: "AI overwriting manual edit",
+      }).applied,
+      false
+    );
+
+    // Current valid request applies cleanly
+    const okMerge = applyAsyncTranslationResultIfEligible({
+      requestSeq: 2,
+      latestRequestSeq: 2,
+      requestCourseId: "c1",
+      activeCourseId: "c1",
+      activeLanguage: "en",
+      requestSourceHash: hashA,
+      currentCourseDescription: "รายละเอียด A",
+      currentTemplate: baseEn,
+      manualEditEpochAtStart: 0,
+      currentManualEditEpoch: 0,
+      translatedText: "Fresh academic English translation.",
+      model: "gemini-4-hydrogen",
+    });
+    assert.equal(okMerge.applied, true);
+    assert.equal(okMerge.template?.customDescription, "Fresh academic English translation.");
+    assert.equal(okMerge.template?.translationMeta?.editedByAdmin, false);
+  });
+
+  // 33. Graceful AI error handling: missing key (503), timeout (504), quota 429, residual Thai (502), client fallback
+  await runTest("33. AI failure/timeout/quota/missing-key returns structured errors without fake translation or key leakage", async () => {
+    const mockDb = createMockAdminDb({});
+    const baseAdminDeps = {
+      db: mockDb,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      skipRateLimit: true,
+    };
+    const validEvent = {
+      httpMethod: "POST",
+      path: TRANSLATE_DESCRIPTION_ENDPOINT,
+      headers: { authorization: "Bearer admin-jwt" },
+      body: JSON.stringify({ sourceText: "รายละเอียดหลักสูตรภาษาไทย", targetLanguage: "en" }),
+    };
+
+    // Missing GEMINI_API_KEY
+    const prevKey = process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    try {
+      const noKeyRes = await handleTranslateWithDeps(validEvent, { ...baseAdminDeps, geminiApiKey: "" });
+      assert.equal(noKeyRes.statusCode, 503);
+      assert.equal(JSON.parse(noKeyRes.body).code, "AI_TRANSLATION_UNCONFIGURED");
+    } finally {
+      if (prevKey !== undefined) process.env.GEMINI_API_KEY = prevKey;
+    }
+
+    // Timeout
+    const timeoutRes = await handleTranslateWithDeps(validEvent, {
+      ...baseAdminDeps,
+      geminiApiKey: "secret-key",
+      timeoutMs: 25,
+      generateContentFn: async () => new Promise((resolve) => setTimeout(() => resolve({ text: "Too late" }), 120)),
+    });
+    assert.equal(timeoutRes.statusCode, 504);
+    assert.equal(JSON.parse(timeoutRes.body).code, "AI_TIMEOUT");
+
+    // 429 Quota exhausted
+    const quotaRes = await handleTranslateWithDeps(validEvent, {
+      ...baseAdminDeps,
+      geminiApiKey: "secret-key",
+      generateContentFn: async () => {
+        const err: any = new Error("429 RESOURCE_EXHAUSTED quota exceeded");
+        err.status = 429;
+        throw err;
+      },
+    });
+    assert.equal(quotaRes.statusCode, 429);
+    assert.equal(JSON.parse(quotaRes.body).code, "AI_QUOTA_EXHAUSTED");
+
+    // Incomplete translation (still contains Thai)
+    const partialThaiRes = await handleTranslateWithDeps(validEvent, {
+      ...baseAdminDeps,
+      geminiApiKey: "secret-key",
+      generateContentFn: async () => ({ text: "This workshop covers อบรมพัฒนาอาจารย์" }),
+    });
+    assert.equal(partialThaiRes.statusCode, 502);
+    assert.equal(JSON.parse(partialThaiRes.body).code, "AI_INCOMPLETE_TRANSLATION");
+
+    // Client wrapper handles server error cleanly without throwing
+    const clientErr = await translateCourseDescription({
+      idToken: "secret-jwt-token",
+      courseId: "c1",
+      sourceText: "รายละเอียด",
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({ status: "error", code: "AI_TRANSLATION_UNCONFIGURED", message: "Missing key" }),
+          { status: 503, headers: { "Content-Type": "application/json" } }
+        )) as typeof fetch,
+    });
+    assert.equal(clientErr.ok, false);
+    assert.equal(clientErr.code, "AI_TRANSLATION_UNCONFIGURED");
+    assert.ok(!JSON.stringify(clientErr).includes("secret-jwt-token"));
+  });
+
+  // 34. EN Preview HTML, Plain-Text fallback, send_test, and dispatch_batch use EN customDescription & never substitute Thai course.description
+  await runTest("34. Client Preview, Plain-Text, send_test, and dispatch_batch render approved EN description cleanly", async () => {
+    const thaiCourse = {
+      id: "c-bilingual",
+      title: "AI-Assisted Teaching Innovation",
+      language: "th" as const,
+      date: "2026-08-10",
+      startTime: "09:00",
+      endTime: "12:00",
+      locationDetail: "Room A3-301",
+      instructorName: "Dr. Somchai",
+      description: "คำอธิบายภาษาไทยที่ไม่ควรโผล่ในอีเมลภาษาอังกฤษ",
+    };
+
+    const enTemplate = {
+      ...getDefaultPromotionTemplate(thaiCourse, "en"),
+      customDescription: "Translated academic English course overview covering AI-Assisted Teaching.",
+    };
+
+    const preview = renderPromotionEmail({
+      course: thaiCourse,
+      template: enTemplate,
+      registrationUrl: "https://butraining.netlify.app/",
+      recipientName: "Dr. Jane",
+    });
+    assert.ok(preview.htmlBody.includes("Translated academic English course overview"));
+    assert.ok(preview.textBody.includes("Translated academic English course overview"));
+    assert.ok(!preview.htmlBody.includes("คำอธิบายภาษาไทยที่ไม่ควรโผล่"));
+    assert.ok(!preview.textBody.includes("คำอธิบายภาษาไทยที่ไม่ควรโผล่"));
+    assert.ok(preview.htmlBody.includes('<tr><td align="left" style="text-align:left;">'), "Preserve left alignment");
+    assert.ok(preview.htmlBody.includes('href="https://butraining.netlify.app/"'), "Preserve exact registration URL");
+
+    // Verify omission of customDescription in EN NEVER falls back to Thai course.description
+    const omittedCustomDescRendered = renderPromotionEmail({
+      course: thaiCourse,
+      template: { ...enTemplate, customDescription: undefined },
+      registrationUrl: "https://butraining.netlify.app/",
+    });
+    assert.ok(!omittedCustomDescRendered.htmlBody.includes("คำอธิบายภาษาไทย"));
+    assert.ok(!omittedCustomDescRendered.textBody.includes("คำอธิบายภาษาไทย"));
+
+    // Verify send_test & dispatch_batch render EN customDescription identically
+    const db = createMockAdminDb({
+      courses: { "c-bilingual": thaiCourse },
+      campaigns: {
+        "camp-bilingual-en": {
+          id: "camp-bilingual-en",
+          courseId: "c-bilingual",
+          language: "en",
+          registrationUrl: "https://butraining.netlify.app/",
+          posterMode: "none",
+          template: enTemplate,
+          activeLockUntil: "",
+        },
+      },
+      recipientsByCampaign: {
+        "camp-bilingual-en": {
+          "rec-1": { email: "prof@bu.ac.th", name: "Dr. Jane", status: "pending", attempts: 0 },
+        },
+      },
+    });
+
+    const capturedEmails: Array<{ htmlBody: string; textBody: string }> = [];
+    const deps = {
+      db,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      gasUrl: "https://script.google.com/macros/s/mock/exec",
+      gasSecret: "mock-secret",
+      skipRateLimit: true,
+      fetchFn: (async (_url: RequestInfo | URL, init?: RequestInit) => {
+        const p = JSON.parse(String(init?.body || "{}"));
+        capturedEmails.push({ htmlBody: p.messages[0].htmlBody, textBody: p.messages[0].textBody });
+        return new Response(
+          JSON.stringify({
+            status: "success",
+            remainingDailyQuota: 90,
+            results: [{ recipientId: p.messages[0].recipientId, status: "sent" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }) as typeof fetch,
+    };
+
+    const testRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({
+          action: "send_test",
+          courseId: "c-bilingual",
+          testEmail: "kulachet.l@bu.ac.th",
+          language: "en",
+          registrationUrl: "https://butraining.netlify.app/",
+          template: enTemplate,
+          poster: { mode: "none" },
+        }),
+      },
+      deps
+    );
+    assert.equal(testRes.statusCode, 200);
+
+    const dispatchRes = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({ action: "dispatch_batch", campaignId: "camp-bilingual-en" }),
+      },
+      deps
+    );
+    assert.equal(dispatchRes.statusCode, 200);
+    assert.equal(capturedEmails.length, 2);
+    for (const em of capturedEmails) {
+      assert.ok(em.htmlBody.includes("Translated academic English course overview"));
+      assert.ok(em.textBody.includes("Translated academic English course overview"));
+      assert.ok(!em.htmlBody.includes("คำอธิบายภาษาไทย"));
+      assert.ok(!em.textBody.includes("คำอธิบายภาษาไทย"));
+    }
+  });
+
+  // 35. Untranslated Thai text in EN mode blocks client guard, server send_test, and server dispatch_batch BEFORE claiming
+  await runTest("35. Untranslated Thai text in EN Course Overview blocks Test Email and Real Dispatch cleanly", async () => {
+    const thaiCourse = {
+      id: "c-th-leak",
+      title: "English Title",
+      description: "รายละเอียดหลักสูตรภาษาไทย",
+    };
+
+    const untranslatedEnTemplate = {
+      ...getDefaultPromotionTemplate(thaiCourse, "en"),
+      customDescription: "รายละเอียดหลักสูตรภาษาไทยที่ยังไม่ได้แปล",
+    };
+
+    const guard = resolveEnglishDescriptionGuard({
+      language: "en",
+      includeDescription: true,
+      customDescription: untranslatedEnTemplate.customDescription,
+      courseDescription: thaiCourse.description,
+    });
+    assert.equal(guard.blocked, true);
+    assert.equal(guard.code, "UNTRANSLATED_ENGLISH_DESCRIPTION");
+
+    // Disabled includeDescription -> allowed cleanly
+    assert.equal(
+      resolveEnglishDescriptionGuard({
+        language: "en",
+        includeDescription: false,
+        customDescription: untranslatedEnTemplate.customDescription,
+        courseDescription: thaiCourse.description,
+      }).blocked,
+      false
+    );
+
+    const db = createMockAdminDb({
+      courses: { "c-th-leak": thaiCourse },
+      campaigns: {
+        "camp-leak": {
+          id: "camp-leak",
+          courseId: "c-th-leak",
+          language: "en",
+          registrationUrl: "https://butraining.netlify.app/",
+          posterMode: "none",
+          template: untranslatedEnTemplate,
+          activeLockUntil: "",
+        },
+      },
+      recipientsByCampaign: {
+        "camp-leak": {
+          "rec-1": { email: "faculty@bu.ac.th", name: "Dr. Test", status: "pending", attempts: 0 },
+        },
+      },
+    });
+
+    let gasCalled = false;
+    const deps = {
+      db,
+      verifyIdToken: async () => ({ uid: "admin-1", email: "kulachet.l@bu.ac.th", email_verified: true }),
+      verifyAdmin: async () => true,
+      gasUrl: "https://script.google.com/macros/s/mock/exec",
+      gasSecret: "mock-secret",
+      skipRateLimit: true,
+      fetchFn: (async () => {
+        gasCalled = true;
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch,
+    };
+
+    const blockedTest = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({
+          action: "send_test",
+          courseId: "c-th-leak",
+          testEmail: "kulachet.l@bu.ac.th",
+          language: "en",
+          registrationUrl: "https://butraining.netlify.app/",
+          template: untranslatedEnTemplate,
+          poster: { mode: "none" },
+        }),
+      },
+      deps
+    );
+    assert.equal(blockedTest.statusCode, 400);
+    assert.equal(JSON.parse(blockedTest.body).code, "UNTRANSLATED_ENGLISH_DESCRIPTION");
+
+    const blockedDispatch = await handlePromotionWithDeps(
+      {
+        httpMethod: "POST",
+        path: "/api/send-course-promotion",
+        headers: { authorization: "Bearer valid-token" },
+        body: JSON.stringify({ action: "dispatch_batch", campaignId: "camp-leak" }),
+      },
+      deps
+    );
+    assert.equal(blockedDispatch.statusCode, 400);
+    assert.equal(JSON.parse(blockedDispatch.body).code, "UNTRANSLATED_ENGLISH_DESCRIPTION");
+    assert.equal(gasCalled, false);
+    assert.equal(db.store.recipientsByCampaign["camp-leak"]["rec-1"].status, "pending", "Recipient must remain pending when dispatch blocked pre-claim");
+  });
+
+  // 36. Security & architecture check: GEMINI_API_KEY and @google/genai stay strictly server-side, metadata capability configured
+  await runTest("36. Client src/ never imports @google/genai or exposes GEMINI_API_KEY, and metadata.json declares capability", () => {
+    const metadataRaw = fs.readFileSync(path.join(ROOT_DIR, "metadata.json"), "utf8");
+    const metadataJson = JSON.parse(metadataRaw);
+    assert.ok(
+      Array.isArray(metadataJson.majorCapabilities) &&
+        metadataJson.majorCapabilities.includes("MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"),
+      "metadata.json must declare MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+    );
+
+    const walkFiles = (dir: string): string[] => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      const files: string[] = [];
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) files.push(...walkFiles(full));
+        else if (/\.(ts|tsx|js|jsx)$/i.test(e.name)) files.push(full);
+      }
+      return files;
+    };
+
+    const srcFiles = walkFiles(path.join(ROOT_DIR, "src"));
+    for (const file of srcFiles) {
+      const content = fs.readFileSync(file, "utf8");
+      assert.ok(!content.includes("@google/genai"), `Frontend file must never import @google/genai: ${file}`);
+      assert.ok(!content.includes("GEMINI_API_KEY"), `Frontend file must never reference GEMINI_API_KEY: ${file}`);
+      assert.ok(!content.includes("VITE_GEMINI"), `Frontend file must never use VITE_GEMINI*: ${file}`);
+    }
+
+    const fnCode = fs.readFileSync(path.join(ROOT_DIR, "netlify/functions/translate-course-description.ts"), "utf8");
+    assert.ok(fnCode.includes("gemini-4-hydrogen"), "Server translation must use gemini-4-hydrogen");
+    assert.ok(!fnCode.includes("gemini-1.5"), "Server must not use deprecated gemini-1.5 models");
+    assert.ok(!fnCode.includes("gemini-2.0"), "Server must not use deprecated gemini-2.0 models");
   });
 
   console.log(`\n=== All ${passed} Module 22 Offline Tests Passed ===`);

@@ -132,6 +132,11 @@ export function escapeHtml(str: unknown): string {
     .replace(/'/g, "&#039;");
 }
 
+export function containsThaiCharacters(raw: unknown): boolean {
+  if (!raw || typeof raw !== "string") return false;
+  return /[\u0E00-\u0E7F]/.test(raw);
+}
+
 export function containsDangerousHtmlOrScript(raw: unknown): boolean {
   if (!raw || typeof raw !== "string") return false;
   return (
@@ -453,11 +458,15 @@ function buildServerPromotionContent(params: {
   );
   const invitationMessage = sanitizeBodyString(template.invitationMessage, 3000);
   const includeDescription = template.includeDescription !== false;
+  const rawCourseDesc = sanitizeBodyString(course.description, 3000);
+  const effectiveDescSource =
+    template.customDescription !== undefined
+      ? template.customDescription
+      : isEn && containsThaiCharacters(rawCourseDesc)
+      ? ""
+      : rawCourseDesc;
   const descriptionText = includeDescription
-    ? sanitizeBodyString(
-        template.customDescription !== undefined ? template.customDescription : course.description,
-        3000
-      )
+    ? sanitizeBodyString(effectiveDescSource, 3000)
     : "";
   const ctaLabel = sanitizeHeaderString(
     template.ctaLabel || (isEn ? "Register Now" : "ลงทะเบียนเข้าอบรม"),
@@ -1072,6 +1081,25 @@ export async function handlePromotionWithDeps(
     }
     const courseData = courseDoc.data() || {};
 
+    if (language === "en" && template.includeDescription !== false) {
+      const enDescToCheck =
+        template.customDescription !== undefined
+          ? String(template.customDescription || "")
+          : "";
+      if (containsThaiCharacters(enDescToCheck)) {
+        return {
+          statusCode: 400,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({
+            status: "error",
+            code: "UNTRANSLATED_ENGLISH_DESCRIPTION",
+            message:
+              "English Course Overview still contains untranslated Thai text. Please translate or edit the English description before sending a test email.",
+          }),
+        };
+      }
+    }
+
     const posterSrc =
       posterCheck.mode === "inline_cid"
         ? "cid:coursePoster"
@@ -1271,6 +1299,25 @@ export async function handlePromotionWithDeps(
       headers: CORS_HEADERS,
       body: JSON.stringify({ status: "error", code: "UNSAFE_CONTENT", message: "Campaign template failed security validation" }),
     };
+  }
+
+  if (language === "en" && template.includeDescription !== false) {
+    const enDescToCheck =
+      template.customDescription !== undefined
+        ? String(template.customDescription || "")
+        : "";
+    if (containsThaiCharacters(enDescToCheck)) {
+      return {
+        statusCode: 400,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          status: "error",
+          code: "UNTRANSLATED_ENGLISH_DESCRIPTION",
+          message:
+            "ไม่สามารถส่งแคมเปญภาษาอังกฤษได้เนื่องจากรายละเอียดหลักสูตร (Course Overview) ยังมีข้อความภาษาไทย กรุณาแปลหรือแก้ไขเป็นภาษาอังกฤษก่อนส่ง",
+        }),
+      };
+    }
   }
 
   // Validate poster (either inline_cid provided in batch request or stored URL)

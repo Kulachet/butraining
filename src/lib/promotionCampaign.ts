@@ -41,6 +41,9 @@ export type PosterMode = "course_url" | "custom_url" | "inline_cid" | "none";
 
 export const PROMOTION_GATEWAY_ENDPOINT = "/api/send-course-promotion";
 export const PROMOTION_GATEWAY_FALLBACK_ENDPOINT = "/.netlify/functions/send-course-promotion";
+export const TRANSLATE_DESCRIPTION_ENDPOINT = "/api/translate-course-description";
+export const TRANSLATE_DESCRIPTION_FALLBACK_ENDPOINT = "/.netlify/functions/translate-course-description";
+export const MAX_TRANSLATION_SOURCE_CHARS = 6000;
 export const DEFAULT_PROMOTION_BATCH_SIZE = 20;
 export const MAX_PROMOTION_BATCH_SIZE = 25;
 export const MAX_POSTER_BYTES = 800 * 1024; // 800 KB raw decoded limit for CID inline image
@@ -58,6 +61,23 @@ export interface PosterConfig {
   blockedReason?: string;
 }
 
+export interface TranslationMetadata {
+  sourceHash?: string;
+  translatedAt?: string;
+  model?: string;
+  editedByAdmin?: boolean;
+}
+
+export interface TranslationCacheEntry {
+  courseId: string;
+  sourceHash: string;
+  targetLanguage: CampaignLanguage;
+  translatedText: string;
+  editedByAdmin: boolean;
+  translatedAt: string;
+  model?: string;
+}
+
 export interface PromotionTemplateData {
   language: CampaignLanguage;
   subject: string;
@@ -71,6 +91,7 @@ export interface PromotionTemplateData {
   footerNote: string;
   includeDescription: boolean;
   customDescription?: string;
+  translationMeta?: TranslationMetadata;
 }
 
 export interface RawRecipientCandidate {
@@ -118,6 +139,8 @@ export interface PromotionCampaignDoc {
   language: CampaignLanguage;
   subject: string;
   template: PromotionTemplateData;
+  languageDrafts?: Partial<Record<CampaignLanguage, PromotionTemplateData>>;
+  translationCache?: Partial<Record<CampaignLanguage, TranslationCacheEntry>>;
   registrationUrl: string;
   posterMode: PosterMode;
   posterUrl?: string;
@@ -644,6 +667,207 @@ export function reconcileAndValidateRecipients(params: {
   };
 }
 
+export function containsThaiCharacters(text: unknown): boolean {
+  if (!text || typeof text !== "string") return false;
+  return /[\u0E00-\u0E7F]/.test(text);
+}
+
+export function computeDescriptionHash(text: unknown): string {
+  const normalized = String(text || "").replace(/\r\n/g, "\n").trim();
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < normalized.length; i++) {
+    const c = normalized.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= (c + i) & 0xffff;
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return `fnv_${h1.toString(16).padStart(8, "0")}_${h2.toString(16).padStart(8, "0")}_${normalized.length}`;
+}
+
+export function buildTranslationCacheKey(
+  courseId: string,
+  sourceHash: string,
+  targetLanguage: CampaignLanguage = "en"
+): string {
+  return `${(courseId || "").trim()}::${targetLanguage}::${(sourceHash || "").trim()}`;
+}
+
+export function isCachedTranslationStale(
+  entry: TranslationCacheEntry | undefined,
+  currentCourseDescription: string
+): boolean {
+  if (!entry || !entry.sourceHash) return false;
+  const trimmedSource = (currentCourseDescription || "").trim();
+  if (!trimmedSource) return false;
+  return entry.sourceHash !== computeDescriptionHash(trimmedSource);
+}
+
+export function resolveEnglishDescriptionGuard(params: {
+  language: CampaignLanguage;
+  includeDescription: boolean;
+  customDescription?: string;
+  courseDescription?: string;
+}): { blocked: boolean; code?: "UNTRANSLATED_ENGLISH_DESCRIPTION"; reason?: string } {
+  if (params.language !== "en" || !params.includeDescription) {
+    return { blocked: false };
+  }
+  const effectiveDesc =
+    params.customDescription !== undefined
+      ? params.customDescription.trim()
+      : !containsThaiCharacters(params.courseDescription)
+      ? (params.courseDescription || "").trim()
+      : "";
+
+  if (containsThaiCharacters(effectiveDesc)) {
+    return {
+      blocked: true,
+      code: "UNTRANSLATED_ENGLISH_DESCRIPTION",
+      reason:
+        "รายละเอียดหลักสูตรภาษาอังกฤษ (Course Overview) ยังมีข้อความภาษาไทย กรุณาแปลหรือแก้ไขเป็นภาษาอังกฤษก่อนส่งอีเมล",
+    };
+  }
+  return { blocked: false };
+}
+
+export function evaluateEnglishAutoTranslation(params: {
+  language: CampaignLanguage;
+  courseId?: string;
+  courseDescription: string;
+  currentDraft?: PromotionTemplateData;
+  cacheEntry?: TranslationCacheEntry;
+}): {
+  action: "noop" | "translate" | "reuse_cache" | "stale_warning";
+  reuseText?: string;
+  cacheEntry?: TranslationCacheEntry;
+  isStale: boolean;
+  reason: string;
+} {
+  if (params.language !== "en") {
+    return { action: "noop", isStale: false, reason: "language_not_en" };
+  }
+  const trimmedSource = (params.courseDescription || "").trim();
+  if (!trimmedSource) {
+    return { action: "noop", isStale: false, reason: "empty_source" };
+  }
+  if (!containsThaiCharacters(trimmedSource)) {
+    return { action: "noop", isStale: false, reason: "source_already_non_thai" };
+  }
+
+  const currentHash = computeDescriptionHash(trimmedSource);
+  const cacheMatchesCourse = Boolean(
+    params.cacheEntry &&
+      params.cacheEntry.targetLanguage === "en" &&
+      (!params.courseId || params.cacheEntry.courseId === params.courseId) &&
+      params.cacheEntry.translatedText.trim()
+  );
+
+  const draftDesc = (params.currentDraft?.customDescription || "").trim();
+  const draftEditedManually = Boolean(params.currentDraft?.translationMeta?.editedByAdmin);
+
+  // If Admin already edited the English draft directly and it contains valid non-Thai text, preserve it
+  if (draftEditedManually && draftDesc && !containsThaiCharacters(draftDesc)) {
+    const staleByDraft = Boolean(
+      params.currentDraft?.translationMeta?.sourceHash &&
+        params.currentDraft.translationMeta.sourceHash !== currentHash
+    );
+    const staleByCache = cacheMatchesCourse && params.cacheEntry!.sourceHash !== currentHash;
+    return {
+      action: staleByDraft || staleByCache ? "stale_warning" : "noop",
+      isStale: staleByDraft || staleByCache,
+      reason: "manual_edit_preserved",
+    };
+  }
+
+  // Check cached entry
+  if (cacheMatchesCourse && params.cacheEntry) {
+    const stale = params.cacheEntry.sourceHash !== currentHash;
+    if (!stale) {
+      return {
+        action: "reuse_cache",
+        reuseText: params.cacheEntry.translatedText,
+        cacheEntry: params.cacheEntry,
+        isStale: false,
+        reason: "cache_hit",
+      };
+    }
+    // Stale cache (source Thai description changed after earlier translation/manual edit): never overwrite silently
+    return {
+      action: "stale_warning",
+      reuseText: params.cacheEntry.translatedText,
+      cacheEntry: params.cacheEntry,
+      isStale: true,
+      reason: params.cacheEntry.editedByAdmin ? "stale_manual_edit_preserved" : "stale_cache_detected",
+    };
+  }
+
+  // If the current EN draft already has non-empty non-Thai text with matching or missing source hash
+  if (draftDesc && !containsThaiCharacters(draftDesc)) {
+    const staleByMeta = Boolean(
+      params.currentDraft?.translationMeta?.sourceHash &&
+        params.currentDraft.translationMeta.sourceHash !== currentHash
+    );
+    return {
+      action: staleByMeta ? "stale_warning" : "noop",
+      isStale: staleByMeta,
+      reason: staleByMeta ? "stale_template_meta" : "existing_english_draft",
+    };
+  }
+
+  return { action: "translate", isStale: false, reason: "needs_ai_translation" };
+}
+
+export function applyAsyncTranslationResultIfEligible(params: {
+  requestSeq: number;
+  latestRequestSeq: number;
+  requestCourseId: string;
+  activeCourseId?: string;
+  activeLanguage: CampaignLanguage;
+  requestSourceHash: string;
+  currentCourseDescription: string;
+  currentTemplate: PromotionTemplateData;
+  manualEditEpochAtStart: number;
+  currentManualEditEpoch: number;
+  translatedText: string;
+  model?: string;
+  translatedAt?: string;
+}): { applied: boolean; reason: string; template?: PromotionTemplateData } {
+  if (params.requestSeq !== params.latestRequestSeq) {
+    return { applied: false, reason: "superseded_request" };
+  }
+  if (params.activeLanguage !== "en") {
+    return { applied: false, reason: "language_switched_away" };
+  }
+  if ((params.activeCourseId || "") !== params.requestCourseId) {
+    return { applied: false, reason: "course_changed" };
+  }
+  if (computeDescriptionHash(params.currentCourseDescription) !== params.requestSourceHash) {
+    return { applied: false, reason: "source_changed_mid_flight" };
+  }
+  if (params.currentManualEditEpoch !== params.manualEditEpochAtStart) {
+    return { applied: false, reason: "manual_edit_occurred_mid_flight" };
+  }
+
+  const cleanTranslated = params.translatedText.trim();
+  const translatedAt = params.translatedAt || new Date().toISOString();
+  return {
+    applied: true,
+    reason: "applied",
+    template: {
+      ...params.currentTemplate,
+      language: "en",
+      customDescription: cleanTranslated,
+      translationMeta: {
+        sourceHash: params.requestSourceHash,
+        translatedAt,
+        model: params.model,
+        editedByAdmin: false,
+      },
+    },
+  };
+}
+
 export function resolveInitialCampaignLanguage(course?: Partial<Course> | null): CampaignLanguage {
   return resolveCourseLang(course) === "en" ? "en" : "th";
 }
@@ -653,8 +877,11 @@ export function getDefaultPromotionTemplate(
   language: CampaignLanguage
 ): PromotionTemplateData {
   const title = (course?.title || "").trim() || (language === "en" ? "Training Workshop" : "หลักสูตรอบรม");
+  const rawDescription = (course?.description || "").trim();
 
   if (language === "en") {
+    // NEVER copy untranslated Thai description directly into an English email template
+    const safeInitialEnDesc = containsThaiCharacters(rawDescription) ? "" : rawDescription;
     return {
       language: "en",
       subject: `[BU Training Invitation] ${title}`,
@@ -669,7 +896,7 @@ export function getDefaultPromotionTemplate(
       footerNote:
         "This course announcement is sent to Bangkok University faculty and staff. To opt out of future promotional announcements, please reply or contact LDO.",
       includeDescription: true,
-      customDescription: (course?.description || "").trim(),
+      customDescription: safeInitialEnDesc,
     };
   }
 
@@ -687,7 +914,7 @@ export function getDefaultPromotionTemplate(
     footerNote:
       "อีเมลฉบับนี้เป็นข่าวสารประชาสัมพันธ์หลักสูตรอบรมสำหรับคณาจารย์และบุคลากรมหาวิทยาลัยกรุงเทพ หากท่านไม่ประสงค์รับข่าวสารประชาสัมพันธ์หลักสูตร กรุณาติดต่อสำนักพัฒนาการเรียนรู้",
     includeDescription: true,
-    customDescription: (course?.description || "").trim(),
+    customDescription: rawDescription,
   };
 }
 
@@ -780,9 +1007,14 @@ export function renderPromotionEmail(params: {
   const greetingLine = resolveGreetingForRecipient(recipientName, template);
   const speakerText = formatSpeakerForCampaign(course, lang);
   const scheduleRows = resolveCampaignScheduleRows(course, lang);
-  const descriptionText = template.includeDescription
-    ? (template.customDescription !== undefined ? template.customDescription : course.description || "").trim()
-    : "";
+  const rawCourseDesc = (course.description || "").trim();
+  const effectiveDescriptionSource =
+    template.customDescription !== undefined
+      ? template.customDescription
+      : isEn && containsThaiCharacters(rawCourseDesc)
+      ? ""
+      : rawCourseDesc;
+  const descriptionText = template.includeDescription ? effectiveDescriptionSource.trim() : "";
 
   const normalizedRegUrl = validatePublicAppUrl(registrationUrl).valid
     ? buildCourseRegistrationUrl(registrationUrl)
@@ -1379,3 +1611,108 @@ export async function deletePromotionCampaign(params: {
     };
   }
 }
+
+export interface TranslateDescriptionResponse {
+  ok: boolean;
+  httpStatus?: number;
+  code?: string;
+  translatedText?: string;
+  sourceHash?: string;
+  model?: string;
+  message: string;
+}
+
+export async function translateCourseDescription(params: {
+  idToken: string;
+  courseId?: string;
+  courseTitle?: string;
+  sourceText: string;
+  targetLanguage?: "en";
+  fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
+}): Promise<TranslateDescriptionResponse> {
+  const fetcher = params.fetchImpl || fetch;
+  const payload = {
+    courseId: params.courseId || "",
+    courseTitle: params.courseTitle || "",
+    sourceText: params.sourceText,
+    targetLanguage: params.targetLanguage || "en",
+  };
+
+  const doPost = async (endpoint: string) => {
+    const res = await fetcher(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${params.idToken}`,
+      },
+      body: JSON.stringify(payload),
+      ...(params.signal ? { signal: params.signal } : {}),
+    });
+    const rawText = await res.text().catch(() => "");
+    let json: any = null;
+    if (rawText) {
+      try {
+        json = JSON.parse(rawText);
+      } catch {
+        json = null;
+      }
+    }
+    const contentType = (res.headers?.get?.("content-type") || "").toLowerCase();
+    const isHtmlFallback =
+      contentType.includes("text/html") || /^\s*<(?:!doctype|html)\b/i.test(rawText);
+    const isNonJsonRouting404 =
+      (!json && res.status === 404) || (!json && res.status === 200 && isHtmlFallback);
+    return { res, json, rawText, isNonJsonRouting404 };
+  };
+
+  try {
+    let outcome = await doPost(TRANSLATE_DESCRIPTION_ENDPOINT);
+    if (outcome.isNonJsonRouting404) {
+      outcome = await doPost(TRANSLATE_DESCRIPTION_FALLBACK_ENDPOINT);
+    }
+
+    const effectiveStatus = outcome.isNonJsonRouting404 && outcome.res.status === 200 ? 404 : outcome.res.status;
+    if (!outcome.res.ok || !outcome.json || outcome.json.status === "error") {
+      const code = outcome.isNonJsonRouting404
+        ? "ENDPOINT_NOT_FOUND"
+        : typeof outcome.json?.code === "string"
+        ? outcome.json.code
+        : undefined;
+      return {
+        ok: false,
+        httpStatus: effectiveStatus,
+        code,
+        message: extractSafeErrorMessage(
+          outcome.json,
+          effectiveStatus,
+          outcome.rawText,
+          "ไม่สามารถแปลรายละเอียดหลักสูตรเป็นภาษาอังกฤษได้"
+        ),
+      };
+    }
+
+    return {
+      ok: true,
+      httpStatus: outcome.res.status,
+      translatedText: typeof outcome.json.translatedText === "string" ? outcome.json.translatedText : "",
+      sourceHash: typeof outcome.json.sourceHash === "string" ? outcome.json.sourceHash : computeDescriptionHash(params.sourceText),
+      model: typeof outcome.json.model === "string" ? outcome.json.model : undefined,
+      message: "แปลรายละเอียดหลักสูตรเป็นภาษาอังกฤษเรียบร้อยแล้ว",
+    };
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      return {
+        ok: false,
+        code: "ABORTED",
+        message: "ยกเลิกคำขอแปลภาษาก่อนหน้าแล้ว",
+      };
+    }
+    return {
+      ok: false,
+      code: "NETWORK_ERROR",
+      message: `ไม่สามารถติดต่อบริการแปลภาษาได้ (${err?.message || "Network error"}) — สามารถพิมพ์หรือวางรายละเอียดภาษาอังกฤษด้วยตนเองได้`,
+    };
+  }
+}
+

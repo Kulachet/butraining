@@ -1,5 +1,8 @@
 {
   "name": "BU Academic Training Portal 2026",
   "description": "A high-end Academic Training Management System for Bangkok University instructors, featuring Google Auth, instructor registration, and admin portal.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

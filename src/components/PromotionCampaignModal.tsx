@@ -4,13 +4,18 @@ import { db, auth } from "../lib/firebase";
 import { Course, Instructor } from "../types";
 import { useAuth } from "./AuthProvider";
 import {
+  applyAsyncTranslationResultIfEligible,
   buildCampaignRegistrationLink,
+  buildTranslationCacheKey,
   CampaignLanguage,
   CampaignStatus,
+  computeDescriptionHash,
+  containsThaiCharacters,
   CsvParsePreviewResult,
   DEFAULT_PROMOTION_BATCH_SIZE,
   deriveInitialPosterFromCourse,
   dispatchPromotionBatch,
+  evaluateEnglishAutoTranslation,
   fetchPromotionQuota,
   generateCampaignResultsCsv,
   getDefaultPromotionTemplate,
@@ -28,8 +33,11 @@ import {
   RecipientDeliveryStatus,
   reconcileAndValidateRecipients,
   renderPromotionEmail,
+  resolveEnglishDescriptionGuard,
   resolveInitialCampaignLanguage,
   sendPromotionTestEmail,
+  translateCourseDescription,
+  TranslationCacheEntry,
   validateExternalPosterUrl,
 } from "../lib/promotionCampaign";
 import {
@@ -57,6 +65,7 @@ import {
   Globe,
   Image as ImageIcon,
   Inbox,
+  Languages,
   Link as LinkIcon,
   Loader2,
   Mail,
@@ -124,15 +133,61 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
     return res.url || "https://butraining.netlify.app";
   });
 
-  // --- Step 2: Language, Template & Poster ---
+  // --- Step 2: Language, Template, AI Translation & Poster ---
   const [campaignLanguage, setCampaignLanguage] = useState<CampaignLanguage>("th");
   const [template, setTemplate] = useState<PromotionTemplateData>(() =>
     getDefaultPromotionTemplate({ title: "" }, "th")
   );
+  const [languageDrafts, setLanguageDrafts] = useState<Partial<Record<CampaignLanguage, PromotionTemplateData>>>({});
+  const [translationCache, setTranslationCache] = useState<Record<string, TranslationCacheEntry>>({});
+  const [translatingDesc, setTranslatingDesc] = useState(false);
+  const [translationStatusMsg, setTranslationStatusMsg] = useState<{
+    kind: "idle" | "loading" | "success" | "manual" | "stale" | "error";
+    text: string;
+  } | null>(null);
+  const [confirmRetranslateOpen, setConfirmRetranslateOpen] = useState(false);
   const [poster, setPoster] = useState<PosterConfig>({ mode: "none" });
   const [externalPosterInput, setExternalPosterInput] = useState("");
   const [posterWarning, setPosterWarning] = useState("");
   const [posterUploading, setPosterUploading] = useState(false);
+
+  // Race-condition & cancellation guards for async EN translations
+  const translationSeqRef = useRef(0);
+  const translationAbortRef = useRef<AbortController | null>(null);
+  const manualEditEpochRef = useRef(0);
+  const activeLanguageRef = useRef<CampaignLanguage>("th");
+  const activeCourseRef = useRef<Course | null>(null);
+  const templateRef = useRef<PromotionTemplateData>(template);
+  const translationCacheRef = useRef<Record<string, TranslationCacheEntry>>({});
+
+  useEffect(() => {
+    activeLanguageRef.current = campaignLanguage;
+  }, [campaignLanguage]);
+
+  useEffect(() => {
+    activeCourseRef.current = selectedCourse;
+  }, [selectedCourse]);
+
+  useEffect(() => {
+    templateRef.current = template;
+  }, [template]);
+
+  useEffect(() => {
+    translationCacheRef.current = translationCache;
+  }, [translationCache]);
+
+  const applyTemplateUpdate = useCallback(
+    (updater: PromotionTemplateData | ((prev: PromotionTemplateData) => PromotionTemplateData)) => {
+      setTemplate((prev) => {
+        const next = typeof updater === "function" ? updater(prev) : updater;
+        templateRef.current = next;
+        const langKey = next.language || activeLanguageRef.current;
+        setLanguageDrafts((drafts) => ({ ...drafts, [langKey]: next }));
+        return next;
+      });
+    },
+    []
+  );
 
   // --- Step 3: Recipients ---
   const [recipientSourceTab, setRecipientSourceTab] = useState<"paste" | "csv" | "instructor">("paste");
@@ -220,9 +275,239 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
     }
   }, []);
 
+  const findCachedEnForCourse = useCallback((course: Course, cacheMap: Record<string, TranslationCacheEntry>) => {
+    const trimmed = (course.description || "").trim();
+    const exactKey = buildTranslationCacheKey(course.id, computeDescriptionHash(trimmed), "en");
+    if (cacheMap[exactKey]) return cacheMap[exactKey];
+    const matchingCourseEntries = Object.values(cacheMap).filter(
+      (entry) => entry.courseId === course.id && entry.targetLanguage === "en" && entry.translatedText.trim()
+    );
+    return matchingCourseEntries[matchingCourseEntries.length - 1];
+  }, []);
+
+  const triggerEnglishTranslation = useCallback(
+    async (
+      course: Course,
+      options?: {
+        force?: boolean;
+        currentEnTemplate?: PromotionTemplateData;
+        cacheSnapshot?: Record<string, TranslationCacheEntry>;
+      }
+    ) => {
+      const sourceText = (course.description || "").trim();
+      const cacheMap = options?.cacheSnapshot || translationCacheRef.current;
+      const candidateTemplate = options?.currentEnTemplate || templateRef.current;
+      setConfirmRetranslateOpen(false);
+
+      if (!sourceText) {
+        setTranslatingDesc(false);
+        setTranslationStatusMsg({
+          kind: "idle",
+          text: "หลักสูตรนี้ไม่มีรายละเอียดต้นฉบับ สามารถพิมพ์รายละเอียดภาษาอังกฤษเพิ่มเติมได้หากต้องการ",
+        });
+        return;
+      }
+
+      if (!containsThaiCharacters(sourceText)) {
+        setTranslatingDesc(false);
+        setTranslationStatusMsg({
+          kind: "idle",
+          text: "รายละเอียดหลักสูตรต้นฉบับเป็นภาษาอังกฤษอยู่แล้ว",
+        });
+        return;
+      }
+
+      const cachedEntry = findCachedEnForCourse(course, cacheMap);
+      const sourceHash = computeDescriptionHash(sourceText);
+
+      if (!options?.force) {
+        const decision = evaluateEnglishAutoTranslation({
+          language: "en",
+          courseId: course.id,
+          courseDescription: sourceText,
+          currentDraft: candidateTemplate,
+          cacheEntry: cachedEntry,
+        });
+
+        if (decision.action === "reuse_cache" && decision.reuseText) {
+          const restored: PromotionTemplateData = {
+            ...candidateTemplate,
+            language: "en",
+            customDescription: decision.reuseText,
+            translationMeta: {
+              sourceHash: decision.cacheEntry?.sourceHash || sourceHash,
+              translatedAt: decision.cacheEntry?.translatedAt,
+              model: decision.cacheEntry?.model,
+              editedByAdmin: Boolean(decision.cacheEntry?.editedByAdmin),
+            },
+          };
+          applyTemplateUpdate(restored);
+          setTranslatingDesc(false);
+          setTranslationStatusMsg({
+            kind: decision.cacheEntry?.editedByAdmin ? "manual" : "success",
+            text: decision.cacheEntry?.editedByAdmin
+              ? "กู้คืนข้อความภาษาอังกฤษที่คุณแก้ไขไว้สำหรับหลักสูตรนี้แล้ว"
+              : "ใช้คำแปลภาษาอังกฤษที่แคชไว้สำหรับรายละเอียดหลักสูตรนี้แล้ว",
+          });
+          return;
+        }
+
+        if (decision.action === "stale_warning") {
+          if (
+            decision.reuseText &&
+            !(candidateTemplate.customDescription || "").trim()
+          ) {
+            applyTemplateUpdate({
+              ...candidateTemplate,
+              language: "en",
+              customDescription: decision.reuseText,
+              translationMeta: {
+                sourceHash: decision.cacheEntry?.sourceHash,
+                translatedAt: decision.cacheEntry?.translatedAt,
+                model: decision.cacheEntry?.model,
+                editedByAdmin: Boolean(decision.cacheEntry?.editedByAdmin),
+              },
+            });
+          }
+          setTranslatingDesc(false);
+          setTranslationStatusMsg({
+            kind: "stale",
+            text: "รายละเอียดหลักสูตรต้นฉบับมีการเปลี่ยนแปลง คำแปลภาษาอังกฤษนี้อาจไม่เป็นปัจจุบัน — กด 'แปลใหม่' หรือแก้ไขเพิ่มเติมได้",
+          });
+          return;
+        }
+
+        if (decision.action === "noop") {
+          setTranslatingDesc(false);
+          if (candidateTemplate.translationMeta?.editedByAdmin) {
+            setTranslationStatusMsg({
+              kind: "manual",
+              text: "ใช้ข้อความภาษาอังกฤษที่คุณแก้ไขไว้",
+            });
+          } else if ((candidateTemplate.customDescription || "").trim() && !containsThaiCharacters(candidateTemplate.customDescription)) {
+            setTranslationStatusMsg({
+              kind: "success",
+              text: "รายละเอียดภาษาอังกฤษพร้อมใช้งาน (ตรวจสอบหรือแก้ไขเพิ่มเติมได้)",
+            });
+          }
+          return;
+        }
+      }
+
+      const curUser = auth.currentUser;
+      if (!curUser) {
+        setTranslatingDesc(false);
+        setTranslationStatusMsg({
+          kind: "error",
+          text: "ไม่พบเซสชันผู้ดูแลระบบสำหรับเรียกใช้บริการแปลภาษา — สามารถพิมพ์รายละเอียดภาษาอังกฤษด้วยตนเองได้",
+        });
+        return;
+      }
+
+      if (translationAbortRef.current) {
+        translationAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      translationAbortRef.current = controller;
+
+      translationSeqRef.current += 1;
+      const reqSeq = translationSeqRef.current;
+      const editEpochAtStart = manualEditEpochRef.current;
+
+      setTranslatingDesc(true);
+      setTranslationStatusMsg({
+        kind: "loading",
+        text: "กำลังแปลรายละเอียดหลักสูตรเป็นภาษาอังกฤษ... (Translating course description...)",
+      });
+
+      try {
+        const idToken = await curUser.getIdToken();
+        const res = await translateCourseDescription({
+          idToken,
+          courseId: course.id,
+          courseTitle: course.title,
+          sourceText,
+          targetLanguage: "en",
+          signal: controller.signal,
+        });
+
+        if (res.code === "ABORTED" || reqSeq !== translationSeqRef.current) {
+          return;
+        }
+
+        if (!res.ok || !res.translatedText) {
+          setTranslatingDesc(false);
+          setTranslationStatusMsg({
+            kind: "error",
+            text: `${res.message} (คุณสามารถพิมพ์หรือวางข้อความภาษาอังกฤษด้วยตนเองได้ทันที)`,
+          });
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        const finalHash = res.sourceHash || sourceHash;
+        const newCacheEntry: TranslationCacheEntry = {
+          courseId: course.id,
+          sourceHash: finalHash,
+          targetLanguage: "en",
+          translatedText: res.translatedText.trim(),
+          editedByAdmin: false,
+          translatedAt: nowIso,
+          model: res.model,
+        };
+        const cacheKey = buildTranslationCacheKey(course.id, finalHash, "en");
+        setTranslationCache((prev) => {
+          const next = { ...prev, [cacheKey]: newCacheEntry };
+          translationCacheRef.current = next;
+          return next;
+        });
+
+        const mergeResult = applyAsyncTranslationResultIfEligible({
+          requestSeq: reqSeq,
+          latestRequestSeq: translationSeqRef.current,
+          requestCourseId: course.id,
+          activeCourseId: activeCourseRef.current?.id,
+          activeLanguage: activeLanguageRef.current,
+          requestSourceHash: finalHash,
+          currentCourseDescription: activeCourseRef.current?.description || "",
+          currentTemplate: templateRef.current,
+          manualEditEpochAtStart: editEpochAtStart,
+          currentManualEditEpoch: manualEditEpochRef.current,
+          translatedText: res.translatedText,
+          model: res.model,
+          translatedAt: nowIso,
+        });
+
+        if (mergeResult.applied && mergeResult.template) {
+          applyTemplateUpdate(mergeResult.template);
+          setTranslatingDesc(false);
+          setTranslationStatusMsg({
+            kind: "success",
+            text: "แปลรายละเอียดหลักสูตรเป็นภาษาอังกฤษเรียบร้อยแล้ว (สามารถตรวจสอบและแก้ไขเพิ่มเติมได้)",
+          });
+        } else {
+          setTranslatingDesc(false);
+        }
+      } catch (err: any) {
+        if (reqSeq !== translationSeqRef.current) return;
+        setTranslatingDesc(false);
+        setTranslationStatusMsg({
+          kind: "error",
+          text: `${err?.message || "ไม่สามารถแปลรายละเอียดหลักสูตรได้"} — สามารถพิมพ์รายละเอียดภาษาอังกฤษด้วยตนเองได้`,
+        });
+      }
+    },
+    [applyTemplateUpdate, findCachedEnForCourse]
+  );
+
   // Initialize modal state cleanly when opened
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      if (translationAbortRef.current) {
+        translationAbortRef.current.abort();
+      }
+      return;
+    }
     pauseRequestedRef.current = false;
     setAdminConfirmed(false);
     setTestResultMsg(null);
@@ -230,6 +515,11 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
     setSelectedInstructorIds(new Set());
     setCsvPreview(null);
     setPasteText("");
+    setTranslatingDesc(false);
+    setTranslationStatusMsg(null);
+    setConfirmRetranslateOpen(false);
+    manualEditEpochRef.current = 0;
+    translationSeqRef.current += 1;
 
     const defaultTestEmail = normalizeEmailAddress(user?.email);
     setTestEmail(isAuthorizedUniversityEmail(defaultTestEmail) ? defaultTestEmail : "");
@@ -237,6 +527,15 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
 
     const resolvedUrl = resolveInitialPublicAppUrl(typeof window !== "undefined" ? window.location.origin : "");
     setBaseAppUrl(resolvedUrl.url || "https://butraining.netlify.app");
+
+    let restoredCache: Record<string, TranslationCacheEntry> = {};
+    if (existingCampaign?.translationCache?.en) {
+      const entry = existingCampaign.translationCache.en;
+      const k = buildTranslationCacheKey(entry.courseId, entry.sourceHash, "en");
+      restoredCache = { [k]: entry };
+    }
+    setTranslationCache(restoredCache);
+    translationCacheRef.current = restoredCache;
 
     // Load courses, instructors & suppression list
     setLoadingCourses(true);
@@ -250,8 +549,26 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
         if (existingCampaign) {
           const matched = list.find((c) => c.id === existingCampaign.courseId) || initialCourse || null;
           setSelectedCourse(matched);
+          activeCourseRef.current = matched;
+          if (matched && existingCampaign.language === "en") {
+            const cachedEntry = findCachedEnForCourse(matched, restoredCache);
+            const decision = evaluateEnglishAutoTranslation({
+              language: "en",
+              courseId: matched.id,
+              courseDescription: matched.description || "",
+              currentDraft: existingCampaign.template,
+              cacheEntry: cachedEntry,
+            });
+            if (decision.isStale) {
+              setTranslationStatusMsg({
+                kind: "stale",
+                text: "รายละเอียดหลักสูตรต้นฉบับมีการเปลี่ยนแปลง คำแปลภาษาอังกฤษนี้อาจไม่เป็นปัจจุบัน — กด 'แปลใหม่' หรือแก้ไขเพิ่มเติมได้",
+              });
+            }
+          }
         } else if (initialCourse) {
           setSelectedCourse(initialCourse);
+          activeCourseRef.current = initialCourse;
         }
       })
       .catch((err) => console.error("Failed loading courses:", err))
@@ -275,7 +592,13 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
       setCampaignId(existingCampaign.id);
       setCampaignDoc(existingCampaign);
       setCampaignLanguage(existingCampaign.language);
+      activeLanguageRef.current = existingCampaign.language;
       setTemplate(existingCampaign.template);
+      templateRef.current = existingCampaign.template;
+      setLanguageDrafts({
+        ...(existingCampaign.languageDrafts || {}),
+        [existingCampaign.language]: existingCampaign.template,
+      });
       setBatchSize(existingCampaign.batchSize || DEFAULT_PROMOTION_BATCH_SIZE);
       if (existingCampaign.posterMode === "course_url" || existingCampaign.posterMode === "custom_url") {
         setPoster({ mode: existingCampaign.posterMode, publicUrl: existingCampaign.posterUrl || "" });
@@ -300,57 +623,184 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
     } else if (initialCourse) {
       const cid = createNewCampaignId(initialCourse.id);
       const initLang = resolveInitialCampaignLanguage(initialCourse);
+      const thDefault = getDefaultPromotionTemplate(initialCourse, "th");
+      const enDefault = getDefaultPromotionTemplate(initialCourse, "en");
+      const activeTemplate = initLang === "en" ? enDefault : thDefault;
       const derivedPoster = deriveInitialPosterFromCourse(initialCourse);
       setCampaignId(cid);
       setCampaignDoc(null);
       setCampaignRecipients([]);
       setSelectedCourse(initialCourse);
+      activeCourseRef.current = initialCourse;
       setCampaignLanguage(initLang);
-      setTemplate(getDefaultPromotionTemplate(initialCourse, initLang));
+      activeLanguageRef.current = initLang;
+      setTemplate(activeTemplate);
+      templateRef.current = activeTemplate;
+      setLanguageDrafts({ th: thDefault, en: enDefault });
       setPoster(derivedPoster);
       setExternalPosterInput(derivedPoster.publicUrl || "");
       setPosterWarning(derivedPoster.blockedReason || "");
       setRawCandidates([]);
       setStep(initialStep || 2);
+      if (initLang === "en" && containsThaiCharacters(initialCourse.description)) {
+        triggerEnglishTranslation(initialCourse, { currentEnTemplate: enDefault, cacheSnapshot: restoredCache });
+      }
     } else {
+      const thDefault = getDefaultPromotionTemplate({ title: "" }, "th");
+      const enDefault = getDefaultPromotionTemplate({ title: "" }, "en");
       setCampaignId(createNewCampaignId("new"));
       setCampaignDoc(null);
       setCampaignRecipients([]);
       setSelectedCourse(null);
+      activeCourseRef.current = null;
       setCampaignLanguage("th");
-      setTemplate(getDefaultPromotionTemplate({ title: "" }, "th"));
+      activeLanguageRef.current = "th";
+      setTemplate(thDefault);
+      templateRef.current = thDefault;
+      setLanguageDrafts({ th: thDefault, en: enDefault });
       setPoster({ mode: "none" });
       setExternalPosterInput("");
       setPosterWarning("");
       setRawCandidates([]);
       setStep(initialStep || 1);
     }
-  }, [isOpen, initialCourse, existingCampaign, initialStep, user, loadCampaignResultsFromFirestore]);
+  }, [isOpen, initialCourse, existingCampaign, initialStep, user, loadCampaignResultsFromFirestore, findCachedEnForCourse, triggerEnglishTranslation]);
 
   const handleSelectCourse = (course: Course) => {
+    if (translationAbortRef.current) {
+      translationAbortRef.current.abort();
+    }
+    translationSeqRef.current += 1;
+    manualEditEpochRef.current = 0;
+
     const newId = createNewCampaignId(course.id);
     const initLang = resolveInitialCampaignLanguage(course);
+    const thDefault = getDefaultPromotionTemplate(course, "th");
+    const enDefault = getDefaultPromotionTemplate(course, "en");
+    const initialTemplate = initLang === "en" ? enDefault : thDefault;
     const derivedPoster = deriveInitialPosterFromCourse(course);
     setCampaignId(newId);
     setSelectedCourse(course);
+    activeCourseRef.current = course;
     setCampaignLanguage(initLang);
-    setTemplate(getDefaultPromotionTemplate(course, initLang));
+    activeLanguageRef.current = initLang;
+    setTemplate(initialTemplate);
+    templateRef.current = initialTemplate;
+    setLanguageDrafts({ th: thDefault, en: enDefault });
+    setTranslatingDesc(false);
+    setTranslationStatusMsg(null);
+    setConfirmRetranslateOpen(false);
     setPoster(derivedPoster);
     setExternalPosterInput(derivedPoster.publicUrl || "");
     setPosterWarning(derivedPoster.blockedReason || "");
     setCampaignDoc(null);
     setCampaignRecipients([]);
     setStep(2);
+
+    if (initLang === "en" && containsThaiCharacters(course.description)) {
+      triggerEnglishTranslation(course, { currentEnTemplate: enDefault });
+    }
   };
 
   const handleLanguageChange = (nextLang: CampaignLanguage) => {
     if (nextLang === campaignLanguage) return;
+
+    // Persist active language edits before switching so TH and EN remain strictly independent
+    const savedCurrentDraft = templateRef.current;
+    const nextDrafts: Partial<Record<CampaignLanguage, PromotionTemplateData>> = {
+      ...languageDrafts,
+      [campaignLanguage]: savedCurrentDraft,
+    };
+
+    const existingNextDraft =
+      nextDrafts[nextLang] ||
+      (selectedCourse
+        ? getDefaultPromotionTemplate(selectedCourse, nextLang)
+        : getDefaultPromotionTemplate({ title: "" }, nextLang));
+
+    nextDrafts[nextLang] = existingNextDraft;
+    setLanguageDrafts(nextDrafts);
     setCampaignLanguage(nextLang);
-    if (selectedCourse) {
-      setTemplate(getDefaultPromotionTemplate(selectedCourse, nextLang));
-    } else {
-      setTemplate(getDefaultPromotionTemplate({ title: "" }, nextLang));
+    activeLanguageRef.current = nextLang;
+    setTemplate(existingNextDraft);
+    templateRef.current = existingNextDraft;
+    setConfirmRetranslateOpen(false);
+
+    if (nextLang === "th") {
+      if (translationAbortRef.current) {
+        translationAbortRef.current.abort();
+      }
+      translationSeqRef.current += 1;
+      setTranslatingDesc(false);
+      setTranslationStatusMsg(null);
+      return;
     }
+
+    if (selectedCourse) {
+      triggerEnglishTranslation(selectedCourse, { currentEnTemplate: existingNextDraft });
+    }
+  };
+
+  const handleManualDescriptionChange = (value: string) => {
+    manualEditEpochRef.current += 1;
+    setConfirmRetranslateOpen(false);
+
+    const prevMeta = templateRef.current.translationMeta;
+    const isEn = campaignLanguage === "en";
+    const sourceHash = selectedCourse?.description ? computeDescriptionHash(selectedCourse.description) : prevMeta?.sourceHash;
+
+    const updatedTemplate: PromotionTemplateData = {
+      ...templateRef.current,
+      customDescription: value,
+      ...(isEn
+        ? {
+            translationMeta: {
+              ...(prevMeta || {}),
+              sourceHash,
+              editedByAdmin: true,
+            },
+          }
+        : {}),
+    };
+    applyTemplateUpdate(updatedTemplate);
+
+    if (isEn && selectedCourse && value.trim() && !containsThaiCharacters(value)) {
+      const hashToUse = sourceHash || computeDescriptionHash(selectedCourse.description || "");
+      const cacheKey = buildTranslationCacheKey(selectedCourse.id, hashToUse, "en");
+      const cacheEntry: TranslationCacheEntry = {
+        courseId: selectedCourse.id,
+        sourceHash: hashToUse,
+        targetLanguage: "en",
+        translatedText: value.trim(),
+        editedByAdmin: true,
+        translatedAt: new Date().toISOString(),
+        model: prevMeta?.model,
+      };
+      setTranslationCache((prev) => {
+        const next = { ...prev, [cacheKey]: cacheEntry };
+        translationCacheRef.current = next;
+        return next;
+      });
+      setTranslationStatusMsg({
+        kind: "manual",
+        text: "แก้ไขข้อความภาษาอังกฤษด้วยตนเองแล้ว (ระบบจะไม่เขียนทับข้อความนี้โดยอัตโนมัติ)",
+      });
+    } else if (isEn && containsThaiCharacters(value)) {
+      setTranslationStatusMsg({
+        kind: "error",
+        text: "ยังพบข้อความภาษาไทยในคำอธิบายภาษาอังกฤษ — กรุณาแปลเป็นภาษาอังกฤษก่อนส่ง",
+      });
+    }
+  };
+
+  const handleRequestRetranslate = () => {
+    if (!selectedCourse || translatingDesc) return;
+    const hasManualEdits = Boolean(template.translationMeta?.editedByAdmin && (template.customDescription || "").trim());
+    if (hasManualEdits) {
+      setConfirmRetranslateOpen(true);
+      return;
+    }
+    triggerEnglishTranslation(selectedCourse, { force: true, currentEnTemplate: template });
   };
 
   const baseAppUrlValidation = useMemo(() => validatePublicAppUrl(baseAppUrl), [baseAppUrl]);
@@ -536,8 +986,23 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
     });
   }, [selectedCourse, template, registrationUrl, sampleRecipientName, previewPosterSrc]);
 
+  const englishDescGuard = useMemo(
+    () =>
+      resolveEnglishDescriptionGuard({
+        language: campaignLanguage,
+        includeDescription: template.includeDescription,
+        customDescription: template.customDescription,
+        courseDescription: selectedCourse?.description,
+      }),
+    [campaignLanguage, template.includeDescription, template.customDescription, selectedCourse?.description]
+  );
+
   const handleSendTest = async () => {
     if (!selectedCourse) return;
+    if (englishDescGuard.blocked) {
+      toast.error(englishDescGuard.reason || "กรุณาแปลรายละเอียดหลักสูตรเป็นภาษาอังกฤษก่อนส่งอีเมลทดสอบ");
+      return;
+    }
     if (!registrationUrl) {
       toast.error("Published Registration URL ยังไม่ถูกต้อง");
       return;
@@ -608,12 +1073,19 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
 
     setIsSavingCampaign(true);
     try {
+      const mergedDrafts: Partial<Record<CampaignLanguage, PromotionTemplateData>> = {
+        ...languageDrafts,
+        [campaignLanguage]: template,
+      };
+      const enCacheEntry = findCachedEnForCourse(selectedCourse, translationCache);
       const docRecord = buildFirestoreCampaignRecord({
         campaignId,
         courseId: selectedCourse.id,
         courseTitle: selectedCourse.title,
         language: campaignLanguage,
         template,
+        languageDrafts: mergedDrafts,
+        translationCache: enCacheEntry ? { en: enCacheEntry } : undefined,
         registrationUrl,
         poster,
         recipientsCount: reconciliation.eligible.length,
@@ -648,6 +1120,10 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
   };
 
   const handleStartConfirmedDispatch = async () => {
+    if (englishDescGuard.blocked) {
+      toast.error(englishDescGuard.reason || "กรุณาแปลรายละเอียดหลักสูตรเป็นภาษาอังกฤษก่อนเริ่มส่งแคมเปญ");
+      return;
+    }
     if (!adminConfirmed) {
       toast.error("กรุณาติ๊กยืนยันความถูกต้องโดยผู้ดูแลระบบก่อนเริ่มส่งอีเมล");
       return;
@@ -1042,7 +1518,7 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                     <input
                       type="text"
                       value={template.subject}
-                      onChange={(e) => setTemplate({ ...template, subject: e.target.value })}
+                      onChange={(e) => applyTemplateUpdate({ ...template, subject: e.target.value })}
                       className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30"
                     />
                   </div>
@@ -1053,7 +1529,7 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                       <input
                         type="text"
                         value={template.greetingPrefix}
-                        onChange={(e) => setTemplate({ ...template, greetingPrefix: e.target.value })}
+                        onChange={(e) => applyTemplateUpdate({ ...template, greetingPrefix: e.target.value })}
                         className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30"
                       />
                     </div>
@@ -1064,7 +1540,7 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                       <input
                         type="text"
                         value={template.neutralGreetingName}
-                        onChange={(e) => setTemplate({ ...template, neutralGreetingName: e.target.value })}
+                        onChange={(e) => applyTemplateUpdate({ ...template, neutralGreetingName: e.target.value })}
                         className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30"
                       />
                     </div>
@@ -1075,7 +1551,7 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                     <input
                       type="text"
                       value={template.headline}
-                      onChange={(e) => setTemplate({ ...template, headline: e.target.value })}
+                      onChange={(e) => applyTemplateUpdate({ ...template, headline: e.target.value })}
                       className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30"
                     />
                   </div>
@@ -1085,28 +1561,128 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                     <textarea
                       rows={3}
                       value={template.invitationMessage}
-                      onChange={(e) => setTemplate({ ...template, invitationMessage: e.target.value })}
+                      onChange={(e) => applyTemplateUpdate({ ...template, invitationMessage: e.target.value })}
                       className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30"
                     />
                   </div>
 
-                  <div className="space-y-1.5">
-                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={template.includeDescription}
-                        onChange={(e) => setTemplate({ ...template, includeDescription: e.target.checked })}
-                        className="rounded border-slate-300 text-[#8b0000] focus:ring-[#8b0000]"
-                      />
-                      แสดงรายละเอียดหลักสูตรในอีเมล
-                    </label>
+                  <div className="space-y-2 p-3 rounded-xl border border-slate-200 bg-slate-50/70">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={template.includeDescription}
+                          onChange={(e) => applyTemplateUpdate({ ...template, includeDescription: e.target.checked })}
+                          className="rounded border-slate-300 text-[#8b0000] focus:ring-[#8b0000]"
+                        />
+                        {campaignLanguage === "en"
+                          ? "English Course Description (Course Overview)"
+                          : "แสดงรายละเอียดหลักสูตรในอีเมล"}
+                      </label>
+
+                      {campaignLanguage === "en" &&
+                        template.includeDescription &&
+                        containsThaiCharacters(selectedCourse?.description) && (
+                          <button
+                            type="button"
+                            disabled={translatingDesc}
+                            onClick={handleRequestRetranslate}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-700 disabled:opacity-50"
+                          >
+                            {translatingDesc ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#8b0000]" />
+                            ) : (
+                              <Languages className="w-3.5 h-3.5 text-[#8b0000]" />
+                            )}
+                            {translatingDesc ? "กำลังแปล..." : "แปลใหม่ (Translate Again)"}
+                          </button>
+                        )}
+                    </div>
+
+                    {campaignLanguage === "en" && template.includeDescription && translationStatusMsg && (
+                      <div
+                        className={`px-3 py-2 rounded-lg text-xs border flex items-center gap-2 ${
+                          translationStatusMsg.kind === "loading"
+                            ? "bg-slate-100 border-slate-300 text-slate-700"
+                            : translationStatusMsg.kind === "success"
+                            ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                            : translationStatusMsg.kind === "manual"
+                            ? "bg-blue-50 border-blue-200 text-blue-800"
+                            : translationStatusMsg.kind === "stale"
+                            ? "bg-amber-50 border-amber-200 text-amber-800"
+                            : translationStatusMsg.kind === "error"
+                            ? "bg-red-50 border-red-200 text-red-700"
+                            : "bg-white border-slate-200 text-slate-600"
+                        }`}
+                      >
+                        {translationStatusMsg.kind === "loading" && (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                        )}
+                        {(translationStatusMsg.kind === "stale" || translationStatusMsg.kind === "error") && (
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                        )}
+                        {translationStatusMsg.kind === "success" && (
+                          <Sparkles className="w-3.5 h-3.5 shrink-0 text-emerald-700" />
+                        )}
+                        <span>{translationStatusMsg.text}</span>
+                      </div>
+                    )}
+
+                    {confirmRetranslateOpen && (
+                      <div className="p-3 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-900 space-y-2">
+                        <p className="font-semibold">
+                          คุณได้แก้ไขข้อความภาษาอังกฤษไว้ด้วยตนเอง — ต้องการแทนที่ด้วยคำแปล AI ใหม่ใช่หรือไม่?
+                        </p>
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setConfirmRetranslateOpen(false)}
+                            className="px-2.5 py-1 rounded border border-slate-300 bg-white text-slate-700 font-semibold"
+                          >
+                            คงข้อความที่แก้ไขไว้
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              selectedCourse &&
+                              triggerEnglishTranslation(selectedCourse, { force: true, currentEnTemplate: template })
+                            }
+                            className="px-2.5 py-1 rounded bg-[#8b0000] text-white font-semibold"
+                          >
+                            ยืนยันแปลใหม่ทับข้อความเดิม
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     {template.includeDescription && (
                       <textarea
-                        rows={3}
-                        value={template.customDescription ?? selectedCourse.description ?? ""}
-                        onChange={(e) => setTemplate({ ...template, customDescription: e.target.value })}
-                        className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30"
+                        rows={4}
+                        disabled={campaignLanguage === "en" && translatingDesc}
+                        value={
+                          template.customDescription !== undefined
+                            ? template.customDescription
+                            : campaignLanguage === "th"
+                            ? selectedCourse.description ?? ""
+                            : ""
+                        }
+                        placeholder={
+                          campaignLanguage === "en"
+                            ? translatingDesc
+                              ? "Translating Thai course description into academic English..."
+                              : "Enter or review the English Course Overview here..."
+                            : "รายละเอียดหลักสูตรสำหรับแสดงในอีเมล"
+                        }
+                        onChange={(e) => handleManualDescriptionChange(e.target.value)}
+                        className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30 disabled:bg-slate-100 disabled:text-slate-500"
                       />
+                    )}
+
+                    {englishDescGuard.blocked && (
+                      <div className="px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{englishDescGuard.reason}</span>
+                      </div>
                     )}
                   </div>
 
@@ -1116,7 +1692,7 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                       <input
                         type="text"
                         value={template.ctaLabel}
-                        onChange={(e) => setTemplate({ ...template, ctaLabel: e.target.value })}
+                        onChange={(e) => applyTemplateUpdate({ ...template, ctaLabel: e.target.value })}
                         className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30"
                       />
                     </div>
@@ -1125,7 +1701,7 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                       <input
                         type="text"
                         value={template.signatureTitle}
-                        onChange={(e) => setTemplate({ ...template, signatureTitle: e.target.value })}
+                        onChange={(e) => applyTemplateUpdate({ ...template, signatureTitle: e.target.value })}
                         className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#8b0000]/30"
                       />
                     </div>
@@ -1830,9 +2406,16 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                       />
                     </div>
 
+                    {englishDescGuard.blocked && (
+                      <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{englishDescGuard.reason}</span>
+                      </div>
+                    )}
+
                     <button
                       type="button"
-                      disabled={sendingTest || !registrationUrl}
+                      disabled={sendingTest || !registrationUrl || englishDescGuard.blocked}
                       onClick={handleSendTest}
                       className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors disabled:opacity-50"
                     >
@@ -2024,6 +2607,16 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                 </div>
               )}
 
+              {englishDescGuard.blocked && (
+                <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-start gap-2.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block">ไม่สามารถส่งแคมเปญภาษาอังกฤษได้ชั่วคราว</span>
+                    <span>{englishDescGuard.reason}</span>
+                  </div>
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center justify-end gap-3">
                 <button
                   type="button"
@@ -2051,7 +2644,8 @@ export const PromotionCampaignModal: React.FC<PromotionCampaignModalProps> = ({
                     disabled={
                       !adminConfirmed ||
                       !registrationUrl ||
-                      !hasEligibleOrSavedRecipients
+                      !hasEligibleOrSavedRecipients ||
+                      englishDescGuard.blocked
                     }
                     onClick={handleStartConfirmedDispatch}
                     className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-[#8b0000] hover:bg-[#6e0000] text-white text-xs font-bold shadow-sm transition-colors disabled:opacity-40"
